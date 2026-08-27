@@ -5,9 +5,12 @@ The Odoo-side half of the `ODOO` adapter declared in
 Odoo 17 database is what turns `OdooAdapter.available = True` from a
 declaration into something a customer can actually connect.
 
-This is the third piece of the Razyyn stack, alongside:
+This is one piece of the Razyyn stack, alongside:
 - `razyyn/` — the agent backend (FastAPI + LangGraph)
-- `razyyn-frappe-15/` — the same bridge, for ERPNext/Frappe customers
+- `razyyn-frappe-15/` / `razyyn-frappe-14/` — the same bridge, for ERPNext/Frappe
+- `razyyn-odoo-18/` — the Odoo 18 packaging of this exact connector (diverges
+  by one file — see that repo's README, "Known gaps" — Odoo 18 removed the
+  `ir.cron` field `numbercall` this repo's cron data still sets)
 
 ## What it does
 
