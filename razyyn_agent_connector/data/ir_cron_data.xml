@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <record id="ir_cron_razyyn_cleanup_generated_files" model="ir.cron">
+            <field name="name">Razyyn Agent: clean up expired generated reports</field>
+            <field name="model_id" ref="model_razyyn_agent_chat_session"/>
+            <field name="state">code</field>
+            <!-- The model reference above only anchors the cron to this
+                 module; the actual sweep lives in agent_api_service.py and
+                 touches ir.attachment, matching the Frappe app's own hourly
+                 job (agent_api_service.cleanup_old_files). -->
+            <field name="code">
+from odoo.addons.razyyn_agent_connector.services import agent_api_service
+agent_api_service.cleanup_old_files(env)
+            </field>
+            <field name="interval_number">1</field>
+            <field name="interval_type">hours</field>
+            <field name="numbercall">-1</field>
+            <field name="active">1</field>
+        </record>
+    </data>
+</odoo>
