@@ -114,8 +114,18 @@ def validate_and_execute_query(env, sql_query: str, max_rows: int = DEFAULT_MAX_
             # after it on the same line — including this wrapper's closing
             # `) AS ... LIMIT %s` — and either break or, worse, silently drop
             # the row cap.
-            capped = f"SELECT * FROM (\n{clean_query}\n) AS razyyn_agent_capped LIMIT %s"
-            cr.execute(capped, (max_rows + 1,))
+            #
+            # The cap is inlined as an integer rather than passed as a psycopg2
+            # parameter, and the execute below is called with NO parameter
+            # tuple, on purpose. Passing *any* parameters makes psycopg2
+            # %-interpolate the ENTIRE statement — the agent's own SQL included
+            # — so an ordinary query carrying a percent sign (`LIKE '%acme%'`,
+            # or `amount % 2`) has its `%` read as a placeholder and dies with
+            # "tuple index out of range". max_rows is a server-controlled int,
+            # never agent text, so inlining it is safe and keeps psycopg2 out of
+            # the agent's SQL entirely.
+            capped = f"SELECT * FROM (\n{clean_query}\n) AS razyyn_agent_capped LIMIT {int(max_rows) + 1}"
+            cr.execute(capped)
             rows = cr.dictfetchall()
     except ForbiddenQueryError:
         raise
