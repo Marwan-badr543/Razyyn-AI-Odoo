@@ -43,35 +43,48 @@ purpose (see its own docstring for why: `models/__init__.py` and
 that package pulls that import in even if the test itself never touches
 `odoo`).
 
-## Not available by default — on purpose
+## Verified end-to-end (2026-08-27)
 
-`OdooAdapter.available` in `razyyn/agent/erp/adapters.py` is gated behind
-`RAZYYN_ODOO_ADAPTER_VERIFIED=true`, not hardcoded on. Nothing in this repo
-has run the six routes against a live Odoo instance, and shipping "available"
-on the strength of code review alone is exactly the failure
-`ErpUnsupportedError`'s own docstring warns about: a connection that verifies
-and then fails on the customer's first question. Set that variable once
-someone has actually done the walkthrough below — not before.
+Installed on a real Odoo 17 + PostgreSQL 15 instance (Docker: `odoo:17.0`),
+module loaded clean, and all six routes walked over real HTTP with a real
+`razyyn.agent.settings` API key:
+
+- `execute_query` — real SELECT against `res_partner`, correct rows back
+- `get_schema` — real field introspection on `res.partner`
+- Guard: `UPDATE` refused, `res_users.password` column refused,
+  `razyyn_agent_settings` (this module's own credential table) refused
+- A failing query (bad column name) returns a clean driver-error message,
+  and the *next* query on the same connection still works — the
+  `cr.savepoint()` fix holds
+- A query ending in a trailing SQL comment still gets its row cap applied —
+  the LIMIT-wrapper fix holds
+- `request_clarification` — auto-creates its session, saves the message
+- `upload_file` — multipart upload, real `ir.attachment` created
+- `messaging_config` / `send_message` — honest empty-channels / 409 refusal
+
+One real bug this run caught that no amount of review would have:
+**`ir.cron`'s `code` field runs through Odoo's `safe_eval` sandbox, which
+forbids `import` outright** — the original `data/ir_cron_data.xml` did
+`from odoo.addons.razyyn_agent_connector.services import agent_api_service`
+directly in the cron code and failed the whole module install with
+`forbidden opcode(s) ... IMPORT_NAME, IMPORT_FROM`. Fixed by moving the
+import into an ordinary method (`AgentChatSession.
+cron_cleanup_expired_generated_files`) that the cron calls via the `model`
+the sandbox already binds — see that method's docstring.
+
+`RAZYYN_ODOO_ADAPTER_VERIFIED=true` (in `razyyn/agent/erp/adapters.py`) can
+now be set with actual evidence behind it, not just code review. Re-run this
+walkthrough after any change to `controllers/`, `models/`, or
+`services/agent_api_service.py` before relying on that flag again — none of
+this is enforced by CI yet.
 
 ## Known gaps — read before relying on this in production
 
-1. **Not yet run against a live Odoo instance.** No `odoo` package is
-   available in the environment this addon was written in, so
-   `models/`, `controllers/`, and `services/agent_api_service.py` are correct
-   by inspection and by mirroring the Frappe app's already-production
-   reference implementation, but have not executed inside a real Odoo
-   process. Before setting `RAZYYN_ODOO_ADAPTER_VERIFIED=true`: install this
-   on a throwaway Odoo 17 database, run
-   `-i razyyn_agent_connector --test-enable`, and walk each of the six routes
-   with `curl` against real data — a JSON POST for the five that expect one,
-   multipart for `upload_file`. The guard logic itself (the part that
-   actually matters for safety) IS verified without Odoo — see above. Three
-   real bugs an actual HTTP round-trip would have caught were found by
-   review and fixed before this line was written: Odoo's `type="http"`
-   dispatcher does not populate `**kwargs` from a JSON body (only
-   form/multipart), a failing agent query would otherwise abort the whole
-   request's transaction rather than just itself, and `ir.attachment.datas`
-   needs base64-encoded input, not raw bytes. Nothing rules out a fourth.
+1. **No CI wired up for the live-Odoo walkthrough above.** It was run by
+   hand against a throwaway Docker stack; a change to the controller or
+   service layer could silently regress it. `tests/test_query_guard.py`
+   (the security-critical part) DOES run in CI-style automation — see above
+   — but the HTTP/ORM plumbing does not yet have an automated equivalent.
 2. **Messaging is a stub, not a port.** `messaging_config`/`send_message`
    answer honestly (no channels configured / refused) rather than
    half-implementing the Frappe app's Gmail/WhatsApp/Telegram provider layer

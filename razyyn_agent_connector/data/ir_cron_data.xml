@@ -5,14 +5,15 @@
             <field name="name">Razyyn Agent: clean up expired generated reports</field>
             <field name="model_id" ref="model_razyyn_agent_chat_session"/>
             <field name="state">code</field>
-            <!-- The model reference above only anchors the cron to this
-                 module; the actual sweep lives in agent_api_service.py and
-                 touches ir.attachment, matching the Frappe app's own hourly
-                 job (agent_api_service.cleanup_old_files). -->
-            <field name="code">
-from odoo.addons.razyyn_agent_connector.services import agent_api_service
-agent_api_service.cleanup_old_files(env)
-            </field>
+            <!-- ir.cron's `code` runs through Odoo's safe_eval sandbox, which
+                 forbids `import` outright — no exceptions, not even a
+                 relative one. `model` is the one thing the sandbox binds for
+                 us from model_id above, so the entry point has to be a
+                 method on that model; the import (and the actual sweep
+                 logic, shared with the Frappe app's own hourly job) lives in
+                 cron_cleanup_expired_generated_files() instead, an ordinary
+                 method Odoo loads normally, not through this sandbox. -->
+            <field name="code">model.cron_cleanup_expired_generated_files()</field>
             <field name="interval_number">1</field>
             <field name="interval_type">hours</field>
             <field name="numbercall">-1</field>

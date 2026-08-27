@@ -15,7 +15,7 @@ WHY THIS EXISTS AT ALL
     its own ``Agent Chats`` doctype; this is that doctype's Odoo counterpart.
 """
 
-from odoo import fields, models
+from odoo import api, fields, models
 
 
 class AgentChatSession(models.Model):
@@ -44,3 +44,23 @@ class AgentChatSession(models.Model):
 
     def touch(self):
         self.write({"last_update": fields.Datetime.now()})
+
+    @api.model
+    def cron_cleanup_expired_generated_files(self):
+        """Entry point for the hourly ``ir.cron`` job.
+
+        ``ir.cron``'s ``code`` field runs through Odoo's restricted
+        safe_eval sandbox, which forbids ``import``/``from ... import``
+        outright (``forbidden opcode(s) ... IMPORT_NAME, IMPORT_FROM`` —
+        found by actually installing this module on a live Odoo 17, not by
+        review). The cron's code is therefore just ``model.
+        cron_cleanup_expired_generated_files()``, using the ``model``
+        the sandbox already binds from this method's own ``model_id`` —
+        no import needed at that call site. The import happens here
+        instead, in an ordinary Python module Odoo loads normally at
+        install time, which is a completely different code path from the
+        cron sandbox.
+        """
+        from ..services import agent_api_service
+
+        return agent_api_service.cleanup_old_files(self.env)
