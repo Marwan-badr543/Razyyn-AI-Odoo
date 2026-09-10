@@ -1,0 +1,769 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+        The whole page in one template: no OWL, no asset bundle — see
+        controllers/chat_controller.py's module docstring for why. Everything
+        below talks to /razyyn/* on THIS Odoo instance, never straight to
+        the razyyn server; the controller holds the JWT server-side
+        (razyyn.chat.login), the same trust boundary the Frappe chat page
+        keeps by storing its token in the signed-in desk session rather than
+        handing it to arbitrary page JS.
+    -->
+    <template id="chat_page" name="Razyyn Chat">
+        <t t-call="web.layout">
+            <!--
+                web.layout's own arch (verified against the ir.ui.view row
+                for key='web.layout' — see the OUT-OF-DATE COMMENT note
+                below) reads a `title` variable for <title> and a `head`
+                slot for everything else in <head>. An earlier version of
+                this template used `head_website` — the slot the WEBSITE
+                module's frontend layout reads, not this one — and got
+                silently dropped: no error, just an empty <head> beyond
+                what web.layout sets itself, so the three CDN <script> tags
+                below never reached the DOM at all and every agent reply
+                rendered as raw unparsed markdown ("**bold**" verbatim).
+                Caught by checking `window.marked` in the console, not by
+                any visible failure.
+            -->
+            <t t-set="title">Razyyn Chat</t>
+            <t t-set="head">
+                <!--
+                    Same three libraries, same pinned versions + Subresource
+                    Integrity, as razyyn-frappe-15's agent_chat.js: Chart.js
+                    for the ```chartjs fences the agent's own responses
+                    already contain, marked+DOMPurify for everything else
+                    (bold, tables, lists) markdown-formatted responses use.
+                    Loaded as plain blocking <script> tags in <head>, not
+                    Frappe's dynamic inject-with-onload dance — this page is
+                    a fresh full load every time rather than a persistent
+                    desk SPA, so document order alone guarantees all three
+                    are ready before the page's own script at the bottom runs.
+                -->
+                <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
+                        integrity="sha384-dug+JxfBvklEQdJ4AYuBBAIScUz0bVN73xpy273gcAwHjb3qI0fXmuYNaNfdyYJG"
+                        crossorigin="anonymous"></script>
+                <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+                        integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"
+                        crossorigin="anonymous"></script>
+                <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+                        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+                        crossorigin="anonymous"></script>
+            </t>
+            <t t-set="body_classname" t-value="'o_razyyn_chat_body'"/>
+            <div id="razyyn-chat-root">
+                <style>
+                    /* No reset in web.layout's own body tag beyond what the
+                       browser does by default — including its ~8px margin.
+                       #razyyn-chat-root then sat inside that margin with
+                       min-height:100vh of its OWN, so the real document was
+                       taller than the viewport and the whole PAGE scrolled
+                       instead of just .razyyn-thread — the thread's own
+                       overflow-y:auto never got a chance to be the one that
+                       scrolls. html/body get height:100%+margin:0 so
+                       #razyyn-chat-root's height:100vh (not min-height, so
+                       it cannot grow past the viewport either) is the only
+                       thing establishing page height, and its own
+                       overflow:hidden stops it from ever being a second
+                       scroll container competing with .razyyn-thread.
+                    */
+                    html, body, body.o_razyyn_chat_body {
+                        height: 100%; margin: 0 !important; padding: 0;
+                    }
+                    #razyyn-chat-root, #razyyn-chat-root * { box-sizing: border-box; }
+                    #razyyn-chat-root {
+                        font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+                        background: #f8f7fc;
+                        height: 100vh;
+                        overflow: hidden;
+                        display: flex;
+                        flex-direction: column;
+                        color: #1f1533;
+                    }
+                    .razyyn-topbar {
+                        display: flex; align-items: center; justify-content: space-between;
+                        padding: 12px 20px; background: #fff; border-bottom: 1px solid #dce4f5;
+                        flex-shrink: 0;
+                    }
+                    /* The mark stands in for the leading "R" in "Razyyn" —
+                       it has to stay first, always, regardless of page
+                       direction. Under dir="rtl" (Arabic) a plain
+                       inline-flex row reverses with the surrounding
+                       context, same as the rest of the topbar correctly
+                       does — but this lockup is a fixed logo, not
+                       translatable content, so it is pinned to
+                       direction:ltr + unicode-bidi:isolate to opt it out of
+                       that reversal. Without this the mark ends up trailing
+                       after "Chat" instead of leading "azyyn". */
+                    .razyyn-topbar .brand {
+                        font-weight: 700; color: #1e40af; display: inline-flex; align-items: center;
+                        direction: ltr; unicode-bidi: isolate;
+                    }
+                    .agent-brand-mark { display: inline-flex; align-self: center; margin-right: 3px; line-height: 0; }
+                    .agent-brand-mark svg { display: block; height: 20px; width: auto; }
+                    .razyyn-topbar-right { display: flex; align-items: center; gap: 10px; }
+                    .razyyn-lang-select {
+                        padding: 3px 6px; height: 28px; border-radius: 6px; font-size: 12px; font-weight: 600;
+                        cursor: pointer; background: #fff; color: #1e1533; border: 1px solid #dce4f5;
+                    }
+                    .razyyn-status { font-size: 13px; color: #6b6580; }
+                    .razyyn-status button {
+                        margin-left: 8px; border: none; background: none; color: #3050af;
+                        cursor: pointer; text-decoration: underline; font-size: 13px;
+                    }
+
+                    .razyyn-auth-card {
+                        max-width: 380px; margin: 60px auto; background: #fff;
+                        border-radius: 10px; padding: 28px; box-shadow: 0 2px 12px rgba(0,0,0,.06);
+                    }
+                    .razyyn-auth-card h2 { text-align: center; color: #1e40af; margin: 0 0 16px; }
+                    .razyyn-tabs { display: flex; border-bottom: 1px solid #dce4f5; margin-bottom: 16px; }
+                    .razyyn-tabs button {
+                        flex: 1; padding: 8px; border: none; background: none; cursor: pointer;
+                        font-weight: 600; color: #999; border-bottom: 2px solid transparent;
+                    }
+                    .razyyn-tabs button.active { color: #1e40af; border-bottom-color: #1e40af; }
+                    .razyyn-field { margin-bottom: 12px; }
+                    .razyyn-field label { display: block; font-size: 13px; margin-bottom: 4px; color: #555; }
+                    .razyyn-field input {
+                        width: 100%; padding: 8px 10px; border: 1px solid #c7d2e8; border-radius: 6px;
+                        font-size: 14px;
+                    }
+                    .razyyn-submit {
+                        width: 100%; padding: 10px; border: none; border-radius: 6px;
+                        background: #1e40af; color: #fff; font-weight: 600; cursor: pointer; margin-top: 4px;
+                    }
+                    .razyyn-submit:disabled { opacity: .6; cursor: default; }
+                    .razyyn-msg { font-size: 13px; margin-top: 10px; padding: 8px 10px; border-radius: 6px; }
+                    .razyyn-msg.error { background: #fdecea; color: #a13a3a; }
+                    .razyyn-msg.ok { background: #e8f6ee; color: #1f7a4d; }
+
+                    /* Layout: sidebar + thread, the same split Frappe's own
+                       agent-chat page uses (dark chat-list rail, light
+                       thread pane) rather than the single-column MVP this
+                       replaced. */
+                    .razyyn-layout {
+                        display: flex; flex: 1; min-height: 0; max-width: 1100px; width: 100%; margin: 0 auto;
+                        border-top: 1px solid #dce4f5; box-shadow: 0 2px 12px rgba(0,0,0,.06);
+                    }
+                    .razyyn-sidebar {
+                        width: 230px; flex-shrink: 0; background: #182a52; color: #c7d2e8;
+                        padding: 16px 10px; overflow-y: auto;
+                    }
+                    .razyyn-new-chat {
+                        width: 100%; padding: 10px; border: none; border-radius: 6px;
+                        background: #1e40af; color: #fff; font-weight: 600; cursor: pointer; margin-bottom: 12px;
+                    }
+                    .razyyn-chat-item {
+                        padding: 8px 10px; border-radius: 6px; font-size: 13px; cursor: pointer;
+                        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;
+                    }
+                    .razyyn-chat-item:hover { background: #233a6e; }
+                    .razyyn-chat-item.active { background: #2d4a8f; color: #fff; }
+
+                    .razyyn-chat-wrap {
+                        flex: 1; display: flex; flex-direction: column; padding: 16px; background: #f8f7fc;
+                        min-width: 0; min-height: 0;
+                    }
+                    .razyyn-thread {
+                        flex: 1; background: #fff; border-radius: 10px; overflow-y: auto;
+                        padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.06);
+                    }
+                    .razyyn-bubble { margin-bottom: 14px; }
+                    .razyyn-bubble .who { font-size: 11px; color: #999; margin-bottom: 3px; }
+                    .razyyn-bubble .body {
+                        display: inline-block; padding: 8px 12px; border-radius: 8px; max-width: 85%;
+                        font-size: 14px; line-height: 1.45;
+                    }
+                    .razyyn-bubble.user .body { background: #1e40af; color: #fff; white-space: pre-wrap; }
+                    .razyyn-bubble.error .body { background: #fdecea; color: #a13a3a; white-space: pre-wrap; }
+                    /* Agent replies are rendered markdown (marked.js + DOMPurify),
+                       not plain text — see parse_markdown()/addBubble() below — so
+                       this one gets a wider box and real block-element spacing
+                       instead of pre-wrap, matching how chat_ui_manager.js styles
+                       Frappe's own AI bubble. */
+                    .razyyn-bubble.agent .body {
+                        background: #eef2fb; color: #1f1533; max-width: 92%;
+                    }
+                    .razyyn-bubble.agent .body p { margin: 0 0 8px; }
+                    .razyyn-bubble.agent .body p:last-child { margin-bottom: 0; }
+                    .razyyn-bubble.agent .body ul, .razyyn-bubble.agent .body ol { margin: 0 0 8px 20px; padding: 0; }
+                    .razyyn-bubble.agent .body code {
+                        background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; font-size: 12.5px;
+                    }
+                    .razyyn-bubble.agent .body pre {
+                        background: #182a52; color: #dbe4f7; padding: 10px 12px; border-radius: 6px;
+                        overflow-x: auto; font-size: 12.5px; margin: 0 0 8px;
+                    }
+                    .razyyn-bubble.agent .body pre code { background: none; padding: 0; }
+                    .razyyn-bubble.agent .body table {
+                        border-collapse: collapse; width: 100%; margin: 0 0 8px; font-size: 13px;
+                    }
+                    .razyyn-bubble.agent .body th, .razyyn-bubble.agent .body td {
+                        border: 1px solid #c9d6ef; padding: 5px 8px; text-align: left;
+                    }
+                    .razyyn-bubble.agent .body th { background: #dce4f5; }
+                    .razyyn-bubble.agent .body a { color: #1e40af; }
+
+                    /* Every ```chartjs fence becomes one of these — see the
+                       custom marked renderer + render_chartjs_diagrams()
+                       below, the same two-step (placeholder div, then
+                       instantiate) chat_ui_manager.js uses. Fixed height
+                       because Chart.js's responsive mode needs a sized
+                       parent to size itself against; an unconstrained one
+                       collapses to 0px and the canvas never appears. */
+                    .razyyn-chartjs-container {
+                        position: relative; width: 100%; height: 280px; margin: 4px 0 10px;
+                    }
+
+                    .razyyn-input-row { display: flex; gap: 8px; margin-top: 12px; }
+                    .razyyn-input-row textarea {
+                        flex: 1; resize: none; padding: 10px 12px; border: 1px solid #c7d2e8;
+                        border-radius: 8px; font-size: 14px; font-family: inherit; min-height: 44px;
+                    }
+                    .razyyn-input-row button {
+                        padding: 0 20px; border: none; border-radius: 8px; background: #1e40af;
+                        color: #fff; font-weight: 600; cursor: pointer;
+                    }
+                    .razyyn-input-row button:disabled { opacity: .6; cursor: default; }
+                </style>
+
+                <div class="razyyn-topbar">
+                    <span class="brand">
+                        <!--
+                            The Razyyn brand mark — the low-poly "R" from the
+                            company logo, drawn as vector facets. Copied
+                            verbatim from razyyn-frappe-15's agent_chat.js
+                            (RAZYYN_BRAND_MARK) rather than an <img>: inline
+                            SVG stays crisp at any size, costs no extra
+                            request, and is the actual source of this page's
+                            colour scheme (the purple this page originally
+                            shipped with matched nothing — this mark's blues
+                            are the real brand). Stands in for the leading
+                            "R" in "Razyyn", the same lockup the Frappe page
+                            uses in its title bar.
+                        -->
+                        <span class="agent-brand-mark">
+                            <svg viewBox="0 0 920 1002" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                                <defs>
+                                    <path id="razyyn-mark-body" d="M361,0L568,1L882,161L883,495L652,633L919,1000L612,1001L294,543L293,829L0,999L0,3L361,0Z M294,163L641,340L296,538L294,163Z" fill-rule="evenodd" clip-rule="evenodd"/>
+                                    <clipPath id="razyyn-mark-clip"><use href="#razyyn-mark-body"/></clipPath>
+                                </defs>
+                                <use href="#razyyn-mark-body" fill="#1e40af"/>
+                                <g clip-path="url(#razyyn-mark-clip)">
+                                    <polygon points="2,2 25,2 34,21 284,156 294,168 294,187 271,188 259,200 9,494 2,494 2,2" fill="#1c348a" stroke="#1c348a" stroke-width="8"/>
+                                    <polygon points="285,187 294,192 274,212 31,912 13,961 2,966 2,495 19,487 260,200 285,187" fill="#3050af" stroke="#3050af" stroke-width="8"/>
+                                    <polygon points="294,193 294,535 300,536 300,552 296,547 293,560 275,569 31,951 14,961 275,212 294,193" fill="#3d90ce" stroke="#3d90ce" stroke-width="8"/>
+                                    <polygon points="26,2 544,3 532,20 294,165 34,20 26,2" fill="#3682c8" stroke="#3682c8" stroke-width="8"/>
+                                    <polygon points="289,561 293,829 2,999 2,967 30,954 249,609 289,561" fill="#263f96" stroke="#263f96" stroke-width="8"/>
+                                    <polygon points="883,175 883,495 657,627 653,618 854,215 883,175" fill="#29c3e7" stroke="#29c3e7" stroke-width="8"/>
+                                    <polygon points="319,568 331,570 631,800 617,975 608,993 326,591 312,570 319,568" fill="#284299" stroke="#284299" stroke-width="8"/>
+                                    <polygon points="392,106 604,162 642,332 301,165 309,152 392,106" fill="#284298" stroke="#284298" stroke-width="8"/>
+                                    <polygon points="882,170 853,215 653,617 647,581 648,380 635,344 859,177 882,170" fill="#409dd2" stroke="#409dd2" stroke-width="8"/>
+                                    <polygon points="318,548 653,630 631,799 331,569 311,569 301,552 318,548" fill="#3052ad" stroke="#3052ad" stroke-width="8"/>
+                                    <polygon points="633,345 641,362 503,593 321,547 301,551 305,533 633,345" fill="#297bc3" stroke="#297bc3" stroke-width="8"/>
+                                    <polygon points="634,811 886,976 906,977 917,999 611,999 634,811" fill="#25a7de" stroke="#25a7de" stroke-width="8"/>
+                                    <polygon points="655,638 905,976 886,975 634,810 646,654 655,638" fill="#22d0f2" stroke="#22d0f2" stroke-width="8"/>
+                                    <polygon points="868,153 883,169 859,176 673,320 643,332 610,166 849,163 868,153" fill="#8de3f3" stroke="#8de3f3" stroke-width="8"/>
+                                    <polygon points="572,3 867,153 849,162 609,166 572,28 572,3" fill="#3ad9f1" stroke="#3ad9f1" stroke-width="8"/>
+                                    <polygon points="640,363 647,380 647,609 656,628 505,593 640,363" fill="#53abd9" stroke="#53abd9" stroke-width="8"/>
+                                    <polygon points="545,2 571,2 571,28 604,161 396,106 532,21 545,2" fill="#2d62af" stroke="#2d62af" stroke-width="8"/>
+                                </g>
+                            </svg>
+                        </span>azyyn Chat
+                    </span>
+                    <span class="razyyn-topbar-right">
+                        <!--
+                            Same two languages, same idea, as Frappe's own
+                            .agent-lang-selector (agent_chat.js:681-685):
+                            English + Arabic — Razyyn's actual customer base
+                            is Moroccan. Frappe's version is backed by its
+                            own i18n framework and a per-user "language"
+                            field that also steers translations server-side;
+                            this page has neither, so it is a plain
+                            client-side string-swap (translateUI() below)
+                            persisted in localStorage instead. The agent's
+                            own replies need no such switch — an LLM answers
+                            in whatever language the message was written in
+                            without being told to.
+                        -->
+                        <select class="razyyn-lang-select" id="razyyn-lang-select">
+                            <option value="en">English</option>
+                            <option value="ar">العربية</option>
+                            <option value="fr">Français</option>
+                        </select>
+                        <span class="razyyn-status" id="razyyn-status" data-i18n="checkingConnection">Checking connection…</span>
+                    </span>
+                </div>
+
+                <div class="razyyn-layout" id="razyyn-layout" style="display:none">
+                    <div class="razyyn-sidebar">
+                        <button type="button" class="razyyn-new-chat" id="razyyn-new-chat" data-i18n="newChat">+ New Chat</button>
+                        <div class="razyyn-chat-list" id="razyyn-chat-list"></div>
+                    </div>
+                    <div class="razyyn-chat-wrap" id="razyyn-chat-wrap">
+                        <div class="razyyn-thread" id="razyyn-thread"></div>
+                        <div class="razyyn-input-row">
+                            <textarea id="razyyn-input" placeholder="Type your financial question…" data-i18n-placeholder="inputPlaceholder" rows="2"></textarea>
+                            <button type="button" id="razyyn-send" data-i18n="send">Send</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="razyyn-auth-card" id="razyyn-auth-card">
+                    <h2>Razyyn</h2>
+                    <div class="razyyn-tabs">
+                        <button type="button" id="razyyn-tab-login" class="active" data-i18n="login">Login</button>
+                        <button type="button" id="razyyn-tab-signup" data-i18n="signUp">Sign Up</button>
+                    </div>
+
+                    <form id="razyyn-login-form">
+                        <div class="razyyn-field">
+                            <label data-i18n="emailAddress">Email Address</label>
+                            <input type="email" id="razyyn-login-email" required="required"/>
+                        </div>
+                        <div class="razyyn-field">
+                            <label data-i18n="password">Password</label>
+                            <input type="password" id="razyyn-login-password" required="required"/>
+                        </div>
+                        <button type="submit" class="razyyn-submit" data-i18n="connect">Connect</button>
+                    </form>
+
+                    <form id="razyyn-signup-form" style="display:none">
+                        <div class="razyyn-field">
+                            <label data-i18n="companyName">Company Name</label>
+                            <input type="text" id="razyyn-signup-company" placeholder="e.g. My Company Corp" data-i18n-placeholder="companyNamePlaceholder" required="required"/>
+                        </div>
+                        <div class="razyyn-field">
+                            <label data-i18n="emailAddress">Email Address</label>
+                            <input type="email" id="razyyn-signup-email" required="required"/>
+                        </div>
+                        <div class="razyyn-field">
+                            <label data-i18n="password">Password</label>
+                            <input type="password" id="razyyn-signup-password" minlength="8" required="required"/>
+                        </div>
+                        <button type="submit" class="razyyn-submit" data-i18n="createAccount">Create Account</button>
+                    </form>
+
+                    <div id="razyyn-auth-msg"></div>
+                </div>
+            </div>
+
+            <script type="text/javascript">
+                //<![CDATA[
+                (function () {
+                    "use strict";
+
+                    var el = function (id) { return document.getElementById(id); };
+
+                    // Conversation continuity is session_id-driven, the same
+                    // way Frappe's own agent-chat page works
+                    // (chat_message_handler.js keys every /agent/ask call on
+                    // session_manager.session_id) — the razyyn server's own
+                    // LangGraph checkpointer holds prior turns keyed by this
+                    // id, so the client never resends earlier turns itself.
+                    // An earlier version of this page rebuilt a plain-text
+                    // "User: ...\nAssistant: ..." transcript and sent that as
+                    // a `history` field on every call — the server's history
+                    // parser expects JSON (or nothing) and raised "Invalid
+                    // history format" on the very first turn already, since
+                    // even the empty-string default reached a code path that
+                    // does not special-case it the way the top-level
+                    // coerce_history() does. Session-id-only avoids the
+                    // question entirely.
+                    var sessions = [];       // [{id, title}], newest first, client-side only for now
+                    var activeSessionId = null;
+
+                    function newSessionId() {
+                        if (window.crypto && window.crypto.randomUUID) { return window.crypto.randomUUID(); }
+                        return "sess-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+                    }
+
+                    // UI-string translation only — English + Arabic, same
+                    // two languages Frappe's own .agent-lang-selector offers
+                    // (agent_chat.js:684-685). This is a plain client-side
+                    // swap (no server round trip, no i18n framework), unlike
+                    // Frappe's version which sets the signed-in user's own
+                    // `language` field and reloads so its `__()` framework
+                    // re-renders everything server-side too. The agent's
+                    // OWN replies are untouched by this — an LLM answers in
+                    // whichever language the message was written in on its
+                    // own, with no signal needed from here.
+                    var I18N = {
+                        en: {
+                            newChat: "+ New Chat", send: "Send", login: "Login", signUp: "Sign Up",
+                            emailAddress: "Email Address", password: "Password", connect: "Connect",
+                            companyName: "Company Name", companyNamePlaceholder: "e.g. My Company Corp",
+                            createAccount: "Create Account", checkingConnection: "Checking connection…",
+                            notConnected: "Not connected", connected: "Connected:", disconnect: "Disconnect",
+                            inputPlaceholder: "Type your financial question…", newChatTitle: "New chat", you: "You",
+                        },
+                        ar: {
+                            newChat: "+ محادثة جديدة", send: "إرسال", login: "تسجيل الدخول", signUp: "إنشاء حساب",
+                            emailAddress: "البريد الإلكتروني", password: "كلمة المرور", connect: "اتصال",
+                            companyName: "اسم الشركة", companyNamePlaceholder: "مثال: شركتي",
+                            createAccount: "إنشاء الحساب", checkingConnection: "جارٍ التحقق من الاتصال…",
+                            notConnected: "غير متصل", connected: "متصل:", disconnect: "قطع الاتصال",
+                            inputPlaceholder: "اكتب سؤالك المالي…", newChatTitle: "محادثة جديدة", you: "أنت",
+                        },
+                        fr: {
+                            newChat: "+ Nouvelle discussion", send: "Envoyer", login: "Connexion", signUp: "S'inscrire",
+                            emailAddress: "Adresse e-mail", password: "Mot de passe", connect: "Se connecter",
+                            companyName: "Nom de l'entreprise", companyNamePlaceholder: "ex. Ma Société SARL",
+                            createAccount: "Créer un compte", checkingConnection: "Vérification de la connexion…",
+                            notConnected: "Non connecté", connected: "Connecté :", disconnect: "Déconnecter",
+                            inputPlaceholder: "Posez votre question financière…", newChatTitle: "Nouvelle discussion", you: "Vous",
+                        },
+                    };
+                    var currentLang = "en";
+
+                    function t(key) { return (I18N[currentLang] || I18N.en)[key] || key; }
+
+                    function translateUI() {
+                        document.querySelectorAll("[data-i18n]").forEach(function (node) {
+                            node.textContent = t(node.getAttribute("data-i18n"));
+                        });
+                        document.querySelectorAll("[data-i18n-placeholder]").forEach(function (node) {
+                            node.setAttribute("placeholder", t(node.getAttribute("data-i18n-placeholder")));
+                        });
+                        document.documentElement.setAttribute("dir", currentLang === "ar" ? "rtl" : "ltr");
+                        document.documentElement.setAttribute("lang", currentLang);
+                    }
+
+                    function setLanguage(lang) {
+                        currentLang = I18N[lang] ? lang : "en";
+                        try { window.localStorage.setItem("razyyn-chat-lang", currentLang); } catch (e) { /* private mode, ignore */ }
+                        el("razyyn-lang-select").value = currentLang;
+                        translateUI();
+                    }
+
+                    (function initLanguage() {
+                        var saved = "en";
+                        try { saved = window.localStorage.getItem("razyyn-chat-lang") || "en"; } catch (e) { /* ignore */ }
+                        setLanguage(saved);
+                    })();
+                    el("razyyn-lang-select").addEventListener("change", function (evt) { setLanguage(evt.target.value); });
+
+                    function csrf() {
+                        var meta = document.querySelector('meta[name="csrf_token"]');
+                        return meta ? meta.getAttribute('content') : null;
+                    }
+
+                    function postJson(url, body) {
+                        var token = csrf();
+                        var headers = { "Content-Type": "application/json" };
+                        if (token) { headers["X-CSRF-Token"] = token; }
+                        return fetch(url, {
+                            method: "POST",
+                            headers: headers,
+                            body: JSON.stringify(body || {}),
+                            credentials: "same-origin",
+                        }).then(function (res) {
+                            return res.json().then(function (data) {
+                                return { ok: res.ok, status: res.status, data: data };
+                            });
+                        });
+                    }
+
+                    function getJson(url) {
+                        return fetch(url, { credentials: "same-origin" }).then(function (res) {
+                            return res.json().then(function (data) {
+                                return { ok: res.ok, status: res.status, data: data };
+                            });
+                        });
+                    }
+
+                    function showAuthMessage(text, kind) {
+                        var box = el("razyyn-auth-msg");
+                        box.className = "razyyn-msg " + kind;
+                        box.textContent = text;
+                        box.style.display = "block";
+                    }
+
+                    function switchTab(tab) {
+                        var isLogin = tab === "login";
+                        el("razyyn-tab-login").className = isLogin ? "active" : "";
+                        el("razyyn-tab-signup").className = isLogin ? "" : "active";
+                        el("razyyn-login-form").style.display = isLogin ? "block" : "none";
+                        el("razyyn-signup-form").style.display = isLogin ? "none" : "block";
+                        el("razyyn-auth-msg").style.display = "none";
+                    }
+                    el("razyyn-tab-login").addEventListener("click", function () { switchTab("login"); });
+                    el("razyyn-tab-signup").addEventListener("click", function () { switchTab("signup"); });
+
+                    function enterChat(email) {
+                        el("razyyn-auth-card").style.display = "none";
+                        el("razyyn-layout").style.display = "flex";
+                        el("razyyn-status").innerHTML = t("connected") + " <b>" + email +
+                            "</b>  <button type=\"button\" id=\"razyyn-disconnect\">" + t("disconnect") + "</button>";
+                        el("razyyn-disconnect").addEventListener("click", function () {
+                            postJson("/razyyn/disconnect", {}).then(function () { window.location.reload(); });
+                        });
+                        startNewChat();
+                    }
+
+                    function renderSessionList() {
+                        var list = el("razyyn-chat-list");
+                        list.innerHTML = "";
+                        sessions.forEach(function (session) {
+                            var item = document.createElement("div");
+                            item.className = "razyyn-chat-item" + (session.id === activeSessionId ? " active" : "");
+                            item.textContent = session.title;
+                            item.addEventListener("click", function () { switchToSession(session.id); });
+                            list.appendChild(item);
+                        });
+                    }
+
+                    function switchToSession(sessionId) {
+                        // Client-side only for now: this page has no
+                        // transcript-read endpoint (the Frappe app's
+                        // equivalent is backed by its own "Agent Chats"
+                        // doctype — see razyyn-odoo-17's README "Known
+                        // gaps" for messaging parity being similarly
+                        // scoped down). Switching re-targets new turns at
+                        // that session_id; it does not replay old ones.
+                        activeSessionId = sessionId;
+                        el("razyyn-thread").innerHTML = "";
+                        renderSessionList();
+                    }
+
+                    function startNewChat() {
+                        activeSessionId = newSessionId();
+                        sessions.unshift({ id: activeSessionId, title: t("newChatTitle") });
+                        el("razyyn-thread").innerHTML = "";
+                        renderSessionList();
+                    }
+                    el("razyyn-new-chat").addEventListener("click", startNewChat);
+
+                    function checkStatus() {
+                        getJson("/razyyn/status").then(function (res) {
+                            var msg = res.data.message || {};
+                            if (msg.connected) {
+                                enterChat(msg.email);
+                            } else {
+                                el("razyyn-status").textContent = t("notConnected");
+                            }
+                        }).catch(function () {
+                            el("razyyn-status").textContent = t("notConnected");
+                        });
+                    }
+
+                    el("razyyn-login-form").addEventListener("submit", function (evt) {
+                        evt.preventDefault();
+                        var submitBtn = evt.target.querySelector("button[type=submit]");
+                        submitBtn.disabled = true;
+                        postJson("/razyyn/authenticate", {
+                            mode: "login",
+                            email: el("razyyn-login-email").value,
+                            password: el("razyyn-login-password").value,
+                        }).then(function (res) {
+                            submitBtn.disabled = false;
+                            if (res.ok) {
+                                enterChat(res.data.message.email);
+                            } else {
+                                showAuthMessage(res.data.error || "Login failed.", "error");
+                            }
+                        });
+                    });
+
+                    el("razyyn-signup-form").addEventListener("submit", function (evt) {
+                        evt.preventDefault();
+                        var submitBtn = evt.target.querySelector("button[type=submit]");
+                        submitBtn.disabled = true;
+                        postJson("/razyyn/authenticate", {
+                            mode: "signup",
+                            company_name: el("razyyn-signup-company").value,
+                            email: el("razyyn-signup-email").value,
+                            password: el("razyyn-signup-password").value,
+                        }).then(function (res) {
+                            submitBtn.disabled = false;
+                            if (res.ok) {
+                                enterChat(res.data.message.email);
+                            } else {
+                                showAuthMessage(res.data.error || "Sign up failed.", "error");
+                            }
+                        });
+                    });
+
+                    // marked.js renderer override: a ```chartjs fence becomes a
+                    // sized placeholder div instead of a <pre><code> block, the
+                    // same interception chat_ui_manager.js's Renderer.code does
+                    // (agent_chat.js:185-201). Runs once, as soon as marked has
+                    // finished loading — the three CDN <script> tags in
+                    // head_website are plain blocking scripts, so by the time
+                    // this file's own script runs they are already available;
+                    // no onload/polling dance needed the way Frappe's
+                    // dynamic-inject loader requires one.
+                    if (window.marked) {
+                        var renderer = new window.marked.Renderer();
+                        renderer.code = function (code, language) {
+                            var codeText = code, lang = language;
+                            if (code && typeof code === "object") { codeText = code.text; lang = code.lang; }
+                            if (lang === "chartjs") {
+                                return '<div class="razyyn-chartjs-container" data-processed="false" data-code="' +
+                                    encodeURIComponent(codeText.trim()) + '"></div>';
+                            }
+                            return "<pre><code>" + codeText + "</code></pre>";
+                        };
+                        window.marked.use({ renderer: renderer, breaks: true, gfm: true });
+                    }
+
+                    // Every agent reply passes through here before it is ever
+                    // handed to innerHTML — marked's output (and doubly so
+                    // anything an LLM wrote) can carry a <script> or an
+                    // onerror=, so nothing leaves this function unsanitized.
+                    // Falls back to escaped plain text if either library
+                    // failed to load (CDN blocked, offline) rather than ever
+                    // emitting raw unsanitized HTML.
+                    function parseMarkdown(text) {
+                        if (!text) { return ""; }
+                        if (window.marked && window.DOMPurify) {
+                            try {
+                                return window.DOMPurify.sanitize(window.marked.parse(text));
+                            } catch (err) {
+                                console.error("marked parsing error:", err);
+                            }
+                        }
+                        var div = document.createElement("div");
+                        div.textContent = text;
+                        return div.innerHTML;
+                    }
+
+                    // Chart.js palette + defaults, copied from
+                    // chat_ui_manager.js's render_chartjs_diagrams so a chart
+                    // born from the same agent response looks the same here.
+                    var CHART_PALETTE = ["#1e40af", "#3b82f6", "#f59e0b", "#8b5cf6", "#ec4899", "#ef4444", "#06b6d4", "#14b8a6"];
+                    var CHART_HOVER_PALETTE = ["#1c348a", "#2563eb", "#d97706", "#7c3aed", "#db2777", "#dc2626", "#0891b2", "#0d9488"];
+
+                    function renderChartjsDiagrams(container) {
+                        if (typeof Chart === "undefined") {
+                            // CDN script is still downloading/executing — the
+                            // element exists in the DOM already (marked already
+                            // ran), Chart.js just has not finished loading yet.
+                            setTimeout(function () { renderChartjsDiagrams(container); }, 100);
+                            return;
+                        }
+                        var nodes = container.querySelectorAll('.razyyn-chartjs-container[data-processed="false"]');
+                        nodes.forEach(function (node) {
+                            node.setAttribute("data-processed", "true");
+                            var raw = decodeURIComponent(node.getAttribute("data-code") || "{}")
+                                .trim().replace(/,\s*([\]}])/g, "$1"); // trailing commas an LLM sometimes leaves in
+                            try {
+                                var config = JSON.parse(raw);
+                                if (!config.type) { config.type = "bar"; }
+                                if (!config.data) { config.data = { labels: [], datasets: [] }; }
+                                if (!config.data.datasets) { config.data.datasets = []; }
+
+                                config.data.datasets.forEach(function (dataset, idx) {
+                                    if (["pie", "doughnut", "polarArea"].indexOf(config.type) !== -1) {
+                                        var n = dataset.data ? dataset.data.length : 0;
+                                        dataset.backgroundColor = CHART_PALETTE.slice(0, n);
+                                        dataset.hoverBackgroundColor = CHART_HOVER_PALETTE.slice(0, n);
+                                        dataset.borderColor = "#ffffff";
+                                        dataset.borderWidth = 2;
+                                    } else {
+                                        var color = CHART_PALETTE[idx % CHART_PALETTE.length];
+                                        dataset.backgroundColor = color;
+                                        dataset.borderColor = color;
+                                        if (["line", "radar"].indexOf(config.type) !== -1) {
+                                            dataset.fill = dataset.fill || false;
+                                            dataset.tension = 0.3;
+                                        } else if (config.type === "bar") {
+                                            dataset.hoverBackgroundColor = CHART_HOVER_PALETTE[idx % CHART_HOVER_PALETTE.length];
+                                            dataset.borderRadius = 4;
+                                        }
+                                    }
+                                });
+
+                                config.options = Object.assign({
+                                    responsive: true,
+                                    maintainAspectRatio: false,
+                                    plugins: { legend: { display: true, position: "bottom" } },
+                                }, config.options || {});
+
+                                node.innerHTML = "";
+                                var canvas = document.createElement("canvas");
+                                node.appendChild(canvas);
+                                new Chart(canvas, config);
+                            } catch (err) {
+                                console.error("Chart.js render error:", err);
+                                node.textContent = "Could not render this chart: " + (err.message || err);
+                            }
+                        });
+                    }
+
+                    function addBubble(who, text, kind) {
+                        var thread = el("razyyn-thread");
+                        var bubble = document.createElement("div");
+                        bubble.className = "razyyn-bubble " + kind;
+                        var whoLine = document.createElement("div");
+                        whoLine.className = "who";
+                        whoLine.textContent = who;
+                        var body = document.createElement("div");
+                        body.className = "body";
+                        body.textContent = text;
+                        bubble.appendChild(whoLine);
+                        bubble.appendChild(body);
+                        thread.appendChild(bubble);
+                        thread.scrollTop = thread.scrollHeight;
+                        return body;
+                    }
+
+                    function sendMessage() {
+                        var input = el("razyyn-input");
+                        var text = input.value.trim();
+                        if (!text) { return; }
+                        if (!activeSessionId) { startNewChat(); }
+                        input.value = "";
+                        addBubble(t("you"), text, "user");
+
+                        // First turn in a new chat: give the sidebar entry a
+                        // real title, the same moment Frappe's own session
+                        // manager renames a fresh session from its first
+                        // message.
+                        var session = sessions.filter(function (s) { return s.id === activeSessionId; })[0];
+                        if (session && session.title === t("newChatTitle")) {
+                            session.title = text.length > 40 ? text.slice(0, 40) + "…" : text;
+                            renderSessionList();
+                        }
+
+                        var sendBtn = el("razyyn-send");
+                        sendBtn.disabled = true;
+                        var thinking = addBubble("Razyyn", "Thinking…", "agent");
+
+                        postJson("/razyyn/ask", {
+                            message: text,
+                            session_id: activeSessionId,
+                        }).then(function (res) {
+                            sendBtn.disabled = false;
+                            if (res.ok) {
+                                var answer = (res.data.message && res.data.message.response) || "(no response)";
+                                thinking.innerHTML = parseMarkdown(answer);
+                                thinking.parentNode.className = "razyyn-bubble agent";
+                                renderChartjsDiagrams(thinking);
+                                el("razyyn-thread").scrollTop = el("razyyn-thread").scrollHeight;
+                            } else {
+                                thinking.textContent = res.data.error || "Something went wrong.";
+                                thinking.parentNode.className = "razyyn-bubble error";
+                            }
+                        }).catch(function () {
+                            sendBtn.disabled = false;
+                            thinking.textContent = "Could not reach the server.";
+                            thinking.parentNode.className = "razyyn-bubble error";
+                        });
+                    }
+
+                    el("razyyn-send").addEventListener("click", sendMessage);
+                    el("razyyn-input").addEventListener("keydown", function (evt) {
+                        if (evt.key === "Enter" && !evt.shiftKey) {
+                            evt.preventDefault();
+                            sendMessage();
+                        }
+                    });
+
+                    checkStatus();
+                })();
+                //]]>
+            </script>
+        </t>
+    </template>
+</odoo>

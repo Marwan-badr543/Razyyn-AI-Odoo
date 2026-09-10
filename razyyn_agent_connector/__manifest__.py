@@ -31,14 +31,21 @@ The agent is reached through six routes:
 Authenticated by a per-connection API key (razyyn.agent.settings), never
 by an Odoo user session - the agent is a machine caller, not a logged-in
 user.
+
+Also installs a chat page at /razyyn/chat - Odoo's counterpart to the
+Frappe app's own agent-chat page - where a signed-in Odoo user can sign
+up or log in with their own Razyyn account and chat with the Ask agent
+against this company's data.
     """,
     "author": "Marwan Badr",
     "license": "LGPL-3",
     "category": "Extra Tools",
-    "depends": ["base", "mail"],
+    "depends": ["base", "mail", "web"],
     "data": [
         "security/ir.model.access.csv",
+        "security/chat_login_rules.xml",
         "data/ir_cron_data.xml",
+        "views/chat_templates.xml",
     ],
     "installable": True,
     "application": False,
