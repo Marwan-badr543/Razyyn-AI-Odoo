@@ -73,8 +73,14 @@ _FORBIDDEN_SQL_PATTERNS: list[re.Pattern] = [
         r"\bcopy\b",              # Postgres COPY can read or write the filesystem
         r"\blo_import\b",
         r"\blo_export\b",
-        r"\bpg_read_file\b",
-        r"\bpg_ls_dir\b",
+        # Security audit 2026-09, finding #2: the original patterns matched
+        # only the exact names `pg_read_file`/`pg_ls_dir`, missing sibling
+        # functions with the same filesystem reach —
+        # pg_read_binary_file/pg_stat_file (read) and
+        # pg_ls_waldir/pg_ls_logdir/pg_ls_tmpdir (list). Widened to match the
+        # whole family; also subsumed by the blanket `\bpg_\w+\b` pattern
+        # above, kept here for the specific documentation.
+        r"\bpg_(read|stat|ls)_\w*\b",
         r"\bdblink\b",            # cross-database calls out of a supposedly local read
         r"\bload_file\b",         # MySQL file read — denied even on Postgres; a
         r"\boutfile\b",           # guard scoped to "the dialect we ship on today"
@@ -101,6 +107,20 @@ _DENIED_IDENTIFIER_PATTERNS: list[re.Pattern] = [
         # Postgres engine catalogues. information_schema is handled separately
         # below — the audit agent legitimately enumerates tables and columns
         # through it, so a blanket refusal here would break schema discovery.
+        #
+        # Security audit 2026-09, finding #2: pg_catalog sits on every role's
+        # search_path implicitly, so an UNQUALIFIED read of a system relation
+        # (`SELECT * FROM pg_stat_activity`, `pg_class`, `pg_proc`,
+        # `pg_settings`, `pg_database`, `pg_tables`, ...) was never caught by
+        # a guard that only matched the `pg_catalog.` prefix or a short,
+        # explicit allowlist of names below. This one blanket pattern is the
+        # real fix — it denies ANY bare identifier starting with `pg_`,
+        # schema-qualified or not, known-by-name or not. The specific
+        # patterns beneath it are now redundant in practice; they stay for
+        # auditability/history (each documents *why* that particular table
+        # was called out originally) and as a second line of defence should
+        # this blanket pattern ever be narrowed.
+        r"\bpg_\w+\b",
         r"\bpg_catalog\b",
         r"\bpg_shadow\b",
         r"\bpg_authid\b",
@@ -142,6 +162,15 @@ _DENIED_COLUMN_PATTERNS: list[re.Pattern] = [
         r"\brefresh_token\b",
         r"\bsignup_token\b",
         r"\bdatabase_secret\b",
+        # Security audit 2026-09, finding #4: PII/financial identifiers with
+        # no credential shape, so the previous list waved every one of them
+        # through to the LLM. Real Odoo field names, not guesses:
+        r"\bvat\b",                    # res.partner — VAT / national tax id
+        r"\bacc_number\b",             # res.partner.bank — raw bank account number
+        r"\bsanitized_acc_number\b",   # res.partner.bank — normalised account number
+        r"\biban\b",                   # IBAN, wherever a field is named it directly
+        r"\bbank_account\b",           # generic bank-account-shaped field names
+        r"\bnational_id\b",            # generic national-id-shaped field names
     ]
 ]
 
@@ -167,18 +196,68 @@ _INFORMATION_SCHEMA_PATTERN: re.Pattern = re.compile(
     r"\binformation_schema\b(?:\s*\.\s*([a-zA-Z0-9_]+))?", re.IGNORECASE
 )
 
-_STRING_LITERAL_PATTERN: re.Pattern = re.compile(
+#: Security audit 2026-09, finding #2 (fail-open bug found while fixing it,
+#: same mechanism, found and fixed in two passes — see both comments below):
+#:
+#: Pass 1 bug: this pattern originally matched double-quoted text as if it
+#: were a second string-literal syntax, and blanked it the same way as a
+#: single-quoted one. In Postgres, double quotes are IDENTIFIER quoting, not
+#: a string literal — `"pg_authid"` is the table pg_authid, quoted, not a
+#: string. Blanking it made every denylist check below blind to a quoted
+#: identifier: `SELECT * FROM "pg_authid"` sailed straight through,
+#: undetected by ANY pattern in this file, because the scan never saw the
+#: text "pg_authid" at all.
+#:
+#: Pass 1 fix, pass 2 bug: simply dropping the double-quote alternative (so
+#: only single-quoted text is matched/blanked) let an apostrophe INSIDE a
+#: double-quoted identifier open a phantom single-quoted literal that runs to
+#: the next real apostrophe anywhere later in the query — blanking
+#: everything between them, live SQL included:
+#: ``SELECT id AS "x'y", rolpassword FROM pg_authid WHERE z = 'a'`` — the
+#: scanner sees an opening `'` inside `"x'y"` and doesn't close it until the
+#: `'a'` near the end, blanking `pg_authid` out of the scan entirely, while
+#: Postgres itself reads `"x'y"` as one quoted alias and executes the real
+#: query underneath.
+#:
+#: The actual fix needs both properties at once: still match a whole
+#: double-quoted span AS A UNIT (so an apostrophe inside it can never
+#: desynchronize the single-quote scan), but keep its contents visible to
+#: the denylist checks instead of blanking them, since those checks need to
+#: see the real identifier name. ``_unmask_quoted_span`` below does that:
+#: unwrap a double-quoted span to its bare contents, blank a single-quoted
+#: one to ``''`` as before.
+_QUOTED_SPAN_PATTERN: re.Pattern = re.compile(
     r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"", re.DOTALL
 )
 
 
+def _unmask_quoted_span(match: re.Match) -> str:
+    span = match.group(0)
+    if span.startswith('"'):
+        # Identifier quoting: keep the name visible to the denylists below,
+        # but the substitution happens once, over the ORIGINAL query text —
+        # re.sub never rescans replacement text — so an apostrophe unwrapped
+        # out of the identifier here cannot reopen a phantom literal either.
+        return span[1:-1]
+    return "''"
+
+
 def mask_string_literals(query: str) -> str:
-    """Blank out quoted literals so keyword scanning reads code, not data.
+    """Blank out single-quoted string literals so keyword scanning reads
+    code, not data; unwrap double-quoted identifiers to their bare name so
+    the denylist checks below can still see it.
 
     ``WHERE partner_name ILIKE '%Drop Shipping%'`` is an ordinary accounting
     query. Scanning it raw refuses it for containing "drop".
+
+    Both quote styles are matched by ONE pattern searched over the query
+    text once, each whole span consumed atomically — never two independent
+    passes, and never dropping one style from the pattern outright. Either
+    of those looks like a smaller change but reopens the scanner to
+    desynchronization from a quote character inside the other style's span.
+    See the pattern's own comment for the two ways this already went wrong.
     """
-    return _STRING_LITERAL_PATTERN.sub("''", query)
+    return _QUOTED_SPAN_PATTERN.sub(_unmask_quoted_span, query)
 
 
 def assert_query_is_read_only(query: str) -> None:
@@ -220,6 +299,90 @@ def assert_query_is_read_only(query: str) -> None:
             raise ForbiddenQueryError(
                 "Only information_schema.tables and information_schema.columns may be read."
             )
+
+
+# ─── Primary-table identification (security audit 2026-09, finding #1a) ────
+#
+# ``agent_api_service.validate_and_execute_query`` needs to know which table
+# a caller-supplied SELECT reads from, so it can decide whether a company
+# filter has to be appended before the query runs — ``allowed_company_ids``
+# has no effect on this raw SQL, since it never goes through the ORM. This is
+# intentionally NOT a SQL parser: it is the same lightweight, regex-based
+# identification style the denylist checks above already use, extended to
+# name a table instead of just detecting one. Its accuracy claims are
+# deliberately narrow — see each function's docstring for exactly what it
+# does and does not resolve.
+
+_WITH_START_PATTERN: re.Pattern = re.compile(r"^\s*with\b", re.IGNORECASE)
+
+#: First `FROM <table>` (optionally `<schema>.<table>`, optionally quoted).
+#: Only the FIRST match is used — see ``extract_primary_table``.
+_FROM_TABLE_PATTERN: re.Pattern = re.compile(
+    r"\bfrom\s+(?:\"?([a-zA-Z_][a-zA-Z0-9_]*)\"?\s*\.\s*)?\"?([a-zA-Z_][a-zA-Z0-9_]*)\"?",
+    re.IGNORECASE,
+)
+
+#: The SELECT column list, up to the first top-level FROM.
+_SELECT_LIST_PATTERN: re.Pattern = re.compile(
+    r"^\s*select\s+(?:distinct\s+)?(.*?)\s+from\b", re.IGNORECASE | re.DOTALL
+)
+
+
+def extract_primary_table(query: str) -> str | None:
+    """Best-effort name of *query*'s first ``FROM`` table, or ``None``.
+
+    ``None`` means "this query's shape defeats this lightweight check" —
+    callers MUST treat that as "cannot safely determine whether this table is
+    company-scoped", never as "no company_id column exists". In particular,
+    ``None`` is returned for:
+
+    - a query that opens with a CTE (``WITH x AS (...) SELECT ...``) — the
+      first physical ``FROM`` found could resolve inside the CTE body, not at
+      the top level a caller-visible result set would need scoping at;
+    - a table name qualified with anything other than the ``public`` schema
+      (or unqualified, which Postgres resolves via ``search_path`` and this
+      app's own tables all live in ``public``) — resolving an arbitrary
+      schema correctly needs the session's real search_path, not a guess.
+
+    Known, accepted gap: a query with more than one top-level table in play
+    that this function's single regex search cannot see — a ``UNION`` whose
+    second branch reads a different table, or a ``JOIN`` onto a second
+    multi-company table — is scoped (if at all) only by its FIRST table.
+    Closing that fully needs a real SQL parser, which this module
+    deliberately does not carry (see the module docstring).
+    """
+    scannable = mask_string_literals(query)
+    if _WITH_START_PATTERN.match(scannable.strip()):
+        return None
+
+    match = _FROM_TABLE_PATTERN.search(scannable)
+    if not match:
+        return None
+
+    schema, table = match.group(1), match.group(2)
+    if schema and schema.lower() != "public":
+        return None
+    return table.lower()
+
+
+def select_list_exposes_company_id(query: str) -> bool:
+    """True if *query*'s own SELECT list would carry a ``company_id`` column
+    in its result set — ``SELECT *`` counts, an explicit ``company_id`` (or
+    ``t.company_id``) counts, an aliased-away or omitted one does not.
+
+    This exists because a company filter can only be appended to the OUTER
+    wrapper Postgres runs around the caller's query — it cannot rewrite the
+    caller's own SELECT list — so a query whose result set doesn't expose
+    ``company_id`` has to be refused, not silently run unscoped or silently
+    miss rows.
+    """
+    match = _SELECT_LIST_PATTERN.match(mask_string_literals(query).strip())
+    if not match:
+        return False
+    select_list = match.group(1)
+    if "*" in select_list:
+        return True
+    return bool(re.search(r"\bcompany_id\b", select_list, re.IGNORECASE))
 
 
 @dataclass(frozen=True, slots=True)
