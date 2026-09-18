@@ -42,7 +42,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from odoo import fields as odoo_fields
 
-from .link_match import pick_link_match
+from .link_match import pick_link_match, spellings_of
 from .write_guard import (
     AgentWriteError,
     MissingParameterError,
@@ -259,12 +259,59 @@ def _readable(exc: Exception) -> str:
 # ─── get_document_spec ───────────────────────────────────────────────────────
 
 
+def resolved_doctype(env, doctype: str) -> str | None:
+    """The technical model name for a document type, or None if there is none.
+
+    EVERY ROUTE THAT TAKES A DOCUMENT TYPE ASKS THIS, AND THEY USED TO ASK IT
+    FIVE DIFFERENT WAYS
+        `doctype not in env` appeared in five places here, each answering a
+        label with its own kind of wrong: the spec route said "not a model in
+        this Odoo system", the search route said NOT_INSTALLED — which reads to
+        the agent as "this customer does not have that module", and so to the
+        customer as "your accounting system cannot record sales invoices" — the
+        look-up route said the document did not exist, and preflight said the
+        type did not. One question, four different false answers, all from the
+        name Odoo itself prints on the menu.
+
+        `resolve_model_name` is the one answer. It is the read side's, so the
+        desk that reads a document and the desk that records one agree.
+    """
+    from . import agent_api_service
+
+    try:
+        return agent_api_service.resolve_model_name(env, doctype)
+    except (agent_api_service.ResourceNotFoundError,
+            agent_api_service.MissingParameterError):
+        return None
+
+
+def _doctype_hint(env, doctype: str) -> str:
+    """What this system DOES have, for a refusal that can be acted on."""
+    from . import agent_api_service
+
+    return agent_api_service._model_suggestions(env, str(doctype or ""))
+
+
 def build_document_spec(env, doctype: str) -> dict[str, Any]:
     """The field contract for one model, so the agent never guesses a name."""
     if not doctype:
         raise MissingParameterError("Document type is required.")
-    if doctype not in env:
-        raise ResourceNotFoundError(f"'{doctype}' is not a model in this Odoo system.")
+
+    # The SAME resolution the read side uses, deliberately.
+    #
+    # This used to refuse anything that was not already a technical name, so
+    # "Journal Entry" — Odoo's own label for account.move, printed on the menu
+    # the customer is looking at — was answered with "not a model in this Odoo
+    # system". Two halves of one connector disagreeing about what a document
+    # type is means the desk that READS a document and the desk that RECORDS
+    # one have to be told the name twice, in different spellings.
+    resolved = resolved_doctype(env, doctype)
+    if resolved is None:
+        raise ResourceNotFoundError(
+            f"'{doctype}' is not a model in this Odoo system. "
+            f"{_doctype_hint(env, doctype)}".strip()
+        )
+    doctype = resolved
 
     model = env[doctype]
     fields_spec: list[dict[str, Any]] = []
@@ -358,9 +405,18 @@ def search_documents(
         doctype = str(raw).strip()
         if not doctype:
             continue
-        if doctype not in env:
-            unavailable.append({"doctype": doctype, "reason": "NOT_INSTALLED"})
+        resolved = resolved_doctype(env, doctype)
+        if resolved is None:
+            # Genuinely absent. NOT_INSTALLED is a real answer here and a very
+            # wrong one for a document type that exists under its own label,
+            # which is why it is only reached once resolution has failed.
+            unavailable.append({
+                "doctype": doctype,
+                "reason": "NOT_INSTALLED",
+                "hint": _doctype_hint(env, doctype),
+            })
             continue
+        doctype = resolved
 
         model = env[doctype].sudo()
         domain: list[Any] = []
@@ -420,7 +476,8 @@ def read_document_state(env, doctype: str, docname: str) -> dict[str, Any] | Non
     """
     if not doctype or not docname:
         raise MissingParameterError("Missing doctype or document name.")
-    if doctype not in env:
+    doctype = resolved_doctype(env, doctype)
+    if doctype is None:
         return None
 
     record = _addressed(env, doctype, docname)
@@ -628,10 +685,14 @@ def preflight_document(env, payload: Mapping[str, Any], run_dry_run: bool = True
     doctype = str(payload.get("doctype") or "")
     if not doctype:
         return {"findings": [_finding("doctype", "No document type was given.")]}
-    if doctype not in env:
+    resolved = resolved_doctype(env, doctype)
+    if resolved is None:
         return {"findings": [_finding(
-            "doctype", f"'{doctype}' is not a document type in this system."
+            "doctype",
+            f"'{doctype}' is not a document type in this system. "
+            f"{_doctype_hint(env, doctype)}".strip(),
         )]}
+    doctype = resolved
 
     try:
         check_write_policy(env, doctype, dict(payload))
@@ -767,14 +828,44 @@ def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
     text = str(value).strip()
     if not text:
         return False
-    if text.isdigit():
-        return int(text)
 
     target = env[model_name].sudo()
-    matches = pick_link_match(text, target.name_search(name=text, operator="ilike", limit=8))
+
+    # Tried as written first, and only then on the parts a displayed name is
+    # built from. See link_match.spellings_of: this module hands the agent
+    # "MISC/2026/09/0004 (RAZYYN-TEST-B)" as a document's name and Odoo's own
+    # name_search does not match that string back.
+    matches = []
+    for spelling in spellings_of(text):
+        matches = pick_link_match(
+            spelling, target.name_search(name=spelling, operator="ilike", limit=8),
+        )
+        if matches:
+            break
 
     if isinstance(matches, int):
         return matches
+
+    if not matches and text.isdigit():
+        # A NUMBER IS A NAME FIRST AND AN ID SECOND, and it took a wrong
+        # posting to settle which way round.
+        #
+        # This used to read `if text.isdigit(): return int(text)` before any
+        # lookup at all. Most of the world numbers its chart of accounts, so
+        # `account_id: "400050"` -- the code an accountant reads off their own
+        # trial balance -- went to the database as primary key 400050. Here
+        # that key did not exist and PostgreSQL refused it, which was the lucky
+        # outcome: on a database where some unrelated account happened to hold
+        # that id, the entry would have posted to it, balanced, and been found
+        # at year end.
+        #
+        # So the name is tried first, always, and an id is only what a number
+        # means when it names nothing. Checked for existence rather than
+        # trusted, so a number that is neither is refused rather than written.
+        candidate = target.browse(int(text))
+        if candidate.exists():
+            return candidate.id
+
     if not matches:
         refusal = WriteRejectedError(
             f'I could not find "{text}" in your {model_name} records, so I have '
@@ -795,7 +886,8 @@ def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
     return matches[0][0]
 
 
-def _odoo_values(env, doctype: str, values: Mapping[str, Any]) -> dict[str, Any]:
+def _odoo_values(env, doctype: str, values: Mapping[str, Any],
+                 replacing: bool = False) -> dict[str, Any]:
     """The agent's payload as Odoo's ORM expects to receive it.
 
     Two translations, and both are Odoo's own conventions rather than anything
@@ -809,6 +901,25 @@ def _odoo_values(env, doctype: str, values: Mapping[str, Any]) -> dict[str, Any]
 
     Rows are converted through this same function, so a reference inside a
     journal line is resolved exactly like one on the document itself.
+
+    ``replacing`` IS THE DIFFERENCE BETWEEN CHANGING AN ENTRY AND DOUBLING IT.
+        ``(0, 0, row)`` means "add this row". On a creation that is the only
+        thing it can mean. On a CHANGE it is wrong, and wrong in the most
+        expensive way an accounting agent can be: a customer asked for the two
+        lines of a 300.00 draft to read 450.00, the payload carried both lines
+        at 450.00, and Odoo appended them — leaving one entry with four lines
+        and a value of 750.00 on each side. It balanced, so nothing complained,
+        and the agent reported "now records a 450.00 expense" about a document
+        that recorded 750.00.
+
+        A table sent with a change is the whole of what that table should say
+        afterwards: the payload has no row identities to match on, so there is
+        no other reading available. ``(5, 0, 0)`` clears the table first, which
+        is precisely what ``(6, 0, ids)`` — used for many-to-many below, and
+        always has been — does for the other kind of collection.
+
+        Nested rows are never ``replacing``: a row being created has nothing
+        underneath it to replace.
     """
     model = env[doctype]
     out: dict[str, Any] = {}
@@ -817,10 +928,11 @@ def _odoo_values(env, doctype: str, values: Mapping[str, Any]) -> dict[str, Any]
         if field is None:
             out[key] = value
         elif field.type == "one2many":
-            out[key] = [
+            rows = [
                 (0, 0, _odoo_values(env, field.comodel_name, row))
                 for row in _rows_of(value)
             ]
+            out[key] = [(5, 0, 0), *rows] if replacing else rows
         elif field.type == "many2many":
             if isinstance(value, (list, tuple)):
                 out[key] = [(6, 0, [
@@ -1023,8 +1135,15 @@ def _apply(env, action, doctype, payload, entry, key, session_id, policy):
         raise WriteRejectedError(
             f"'{action}' is not something I can do to a document.", code="INVALID_ACTION"
         )
-    if not doctype or doctype not in env:
-        raise ResourceNotFoundError(f"'{doctype}' is not a document type in this system.")
+    resolved = resolved_doctype(env, doctype) if doctype else None
+    if resolved is None:
+        raise ResourceNotFoundError(
+            f"'{doctype}' is not a document type in this system. "
+            f"{_doctype_hint(env, doctype)}".strip()
+        )
+    # Rebound, so the policy check, the write and the receipt all name the
+    # model the database knows rather than the words the agent used.
+    doctype = resolved
 
     check_write_policy(
         env, doctype, payload if action in ("create", "update", "amend") else None
@@ -1064,7 +1183,8 @@ def _apply(env, action, doctype, payload, entry, key, session_id, policy):
                 _change_a_draft(env, record, doctype, payload)
             elif action == "amend":
                 if payload:
-                    record.write(_odoo_values(env, doctype, payload))
+                    record.write(
+                        _odoo_values(env, doctype, payload, replacing=True))
             elif action == "submit":
                 _invoke(record, _POST_ACTIONS, "post")
             elif action == "cancel":
@@ -1113,7 +1233,7 @@ def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any]) -> No
             f"There is nothing to change on {doctype} {record.id}.",
             code="NOTHING_TO_CHANGE",
         )
-    record.write(_odoo_values(env, doctype, payload))
+    record.write(_odoo_values(env, doctype, payload, replacing=True))
 
 
 def _assert_run_caps(policy, documents: Sequence[Mapping[str, Any]]) -> None:

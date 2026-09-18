@@ -34,12 +34,20 @@
                 <!-- These files are served as standalone static resources, not
                      through Odoo's fingerprinted asset bundles. Odoo caches a
                      static URL for seven days, so keeping the same URL after a
-                     module upgrade can leave the browser running an older RPC
-                     adapter: the server completes /auth/login and saves the
-                     tokens, while the old page appears to do nothing. Change
-                     this cache key whenever the standalone chat assets change. -->
-                <link rel="stylesheet" href="/razyyn_ai/static/src/chat/frappe/agent_chat.css?v=1.2.0"/>
-                <link rel="stylesheet" href="/razyyn_ai/static/src/chat/razyyn_platform.css?v=1.2.0"/>
+                     module upgrade leaves the browser running the older chat
+                     window for a week: no High Thinking switch, a thinking
+                     badge still reading "Router", an older RPC adapter that
+                     appears to do nothing when the server has in fact signed
+                     the customer in.
+
+                     The key used to be a version string typed in here beside a
+                     note asking whoever changed the assets to change it too.
+                     It sat at 1.2.0 while the module reached 1.7.0. It is now
+                     the hash of the asset bytes themselves (see
+                     controllers/chat_stream.chat_assets_token), so it moves
+                     when they move and there is nothing left to remember. -->
+                <link rel="stylesheet" t-att-href="'/razyyn_ai/static/src/chat/frappe/agent_chat.css?v=' + assets_token"/>
+                <link rel="stylesheet" t-att-href="'/razyyn_ai/static/src/chat/razyyn_platform.css?v=' + assets_token"/>
                 <script type="text/javascript" src="/web/static/lib/jquery/jquery.js"></script>
 
                 <!-- What the shim needs to answer frappe.session / frappe.boot
@@ -54,7 +62,7 @@
 
                 <!-- The seventeen calls. Must come before any copied file,
                      because they assign to window.frappe as they load. -->
-                <script type="text/javascript" src="/razyyn_ai/static/src/chat/razyyn_platform.js?v=1.2.0"></script>
+                <script type="text/javascript" t-att-src="'/razyyn_ai/static/src/chat/razyyn_platform.js?v=' + assets_token"></script>
 
                 <!-- The chat window, assembled out of the Frappe app by
                      tools/sync_from_frappe.py exactly as Frappe's own asset
@@ -62,7 +70,7 @@
                      parts load in is declared upstream and must not be
                      re-stated (differently, eventually) here. Do not edit it:
                      run the sync. -->
-                <script type="text/javascript" src="/razyyn_ai/static/src/chat/frappe/agent_chat.js?v=1.2.0"></script>
+                <script type="text/javascript" t-att-src="'/razyyn_ai/static/src/chat/frappe/agent_chat.js?v=' + assets_token"></script>
             </head>
             <body class="razyyn-chat-body">
                 <div id="razyyn-chat-host" class="razyyn-chat-host"/>

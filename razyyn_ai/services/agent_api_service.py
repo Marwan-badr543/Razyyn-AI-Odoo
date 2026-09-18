@@ -44,10 +44,20 @@ class MissingParameterError(Exception):
 
 
 class ResourceNotFoundError(Exception):
-    def __init__(self, resource_type: str, identifier: str) -> None:
+    """Something was asked for by a name nothing here answers to.
+
+    ``hint`` is where the answer goes when this connector knows it. A refusal
+    that only says "not found" leaves the agent to guess the next name, and a
+    guess is another round trip it pays for; one that names what DOES exist
+    turns the retry into a correction.
+    """
+
+    def __init__(self, resource_type: str, identifier: str, hint: str = "") -> None:
         self.resource_type = resource_type
         self.identifier = identifier
-        super().__init__(f"{resource_type} '{identifier}' not found.")
+        self.hint = hint
+        message = f"{resource_type} '{identifier}' not found."
+        super().__init__(f"{message} {hint}".strip())
 
 
 class QueryExecutionError(Exception):
@@ -478,6 +488,122 @@ def _translated_column_sql(env, column: str) -> str:
     return f"COALESCE({', '.join(reads)})"
 
 
+def resolve_model_name(env, wanted: str) -> str:
+    """The technical model name for whatever the agent called it.
+
+    WHY THIS EXISTS
+        A customer's log: ``Model 'Journal Entry' not found.`` "Journal Entry"
+        is not a mistake — it is precisely what Odoo itself calls
+        ``account.move``, on the menu, in the breadcrumb and in ``ir.model``.
+        The agent had read the words off the customer's own screen. A connector
+        that answers a 404 to the name its own interface prints is refusing on
+        a technicality, and the desk has nowhere to go from there: it guesses
+        another spelling, is refused again, and reports that the customer's
+        accounting system has no journal entries.
+
+        So a model is found the way a person finds it — by the name it goes by
+        — and the TECHNICAL name is what comes back, so everything downstream
+        speaks the database's own spelling from then on. That is the same rule
+        the write side already follows: the system publishes its own word.
+
+    The order is exact-technical first, because that is the common case and
+    must never be slowed down or second-guessed by a label search.
+    """
+    wanted = (wanted or "").strip()
+    if not wanted:
+        raise MissingParameterError("model")
+
+    if wanted in env:
+        return wanted
+
+    models = env["ir.model"].sudo()
+
+    # The same name with the other separator: "account move" and "account_move"
+    # are both things a model writes for `account.move`.
+    dotted = re.sub(r"[\s_]+", ".", wanted.lower())
+    if dotted in env:
+        return dotted
+
+    # By the label Odoo shows, case-insensitively. `ir.model.name` is
+    # translated, so this matches whatever language the site runs in. The
+    # singular is tried too: a model asking about several documents writes
+    # "Journal Entries", and the label is "Journal Entry".
+    for candidate in (wanted, _singular(wanted)):
+        if not candidate:
+            continue
+        for field in ("name", "model"):
+            found = models.search([(field, "=ilike", candidate)], limit=1)
+            if found and found.model in env:
+                return found.model
+
+    raise ResourceNotFoundError("Model", wanted, _model_suggestions(env, wanted))
+
+
+def _singular(word: str) -> str:
+    """"Journal Entries" -> "Journal Entry". Plain English, which is what
+    ir.model labels are written in even on a translated site."""
+    lowered = word.strip()
+    if lowered.lower().endswith("ies"):
+        return lowered[:-3] + "y"
+    if lowered.lower().endswith("ses"):
+        return lowered[:-2]
+    if lowered.lower().endswith("s") and not lowered.lower().endswith("ss"):
+        return lowered[:-1]
+    return ""
+
+
+def _model_suggestions(env, wanted: str) -> str:
+    """What this Odoo DOES have that is close to the name asked for.
+
+    Searched over both spellings a model can be asked for — the technical name
+    and the label — because the agent may have either half right.
+    """
+    words = [w for w in re.split(r"[\s._]+", wanted.lower()) if len(w) > 2]
+    if not words:
+        return ""
+
+    leaves = []
+    for word in words:
+        leaves.append(("model", "ilike", word))
+        leaves.append(("name", "ilike", word))
+    # One "|" fewer than there are leaves: Odoo's domains are prefix notation,
+    # and an operator count that does not match the leaves is not a narrower
+    # search, it is a parse error — which this used to swallow, so the hint
+    # that makes the refusal useful silently never appeared.
+    domain = ["|"] * (len(leaves) - 1) + leaves
+    try:
+        candidates = env["ir.model"].sudo().search(domain, limit=40)
+    except Exception:
+        _logger.warning("Could not search models like %r", wanted, exc_info=True)
+        return ""
+
+    def relevance(record):
+        """Most words matched first, then the shortest name.
+
+        Unranked, Odoo returns them in its own order and the nearest model can
+        sit fifth behind three that share one word — which is the difference
+        between a hint the agent acts on and a list it ignores.
+        """
+        technical = record.model.lower()
+        label = (record.name or "").lower()
+        matched = sum(1 for w in words if w in technical or w in label)
+        in_name = sum(1 for w in words if w in technical)
+        return (-matched, -in_name, len(technical))
+
+    named = [
+        f"{record.model} ({record.name})"
+        for record in sorted(
+            (r for r in candidates if r.model in env), key=relevance,
+        )
+    ][:5]
+    if not named:
+        return (
+            "Nothing in this system is named anything like that. Ask for the "
+            "model by its technical name, such as account.move."
+        )
+    return "This system has: " + "; ".join(named) + "."
+
+
 def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
     """Field summary for one Odoo model, shaped for the agent to write SQL from
     — the Odoo counterpart of the Frappe app's ``build_doctype_schema_summary``.
@@ -504,11 +630,9 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
     Raises:
         MissingParameterError, ResourceNotFoundError.
     """
-    if not model_name:
-        raise MissingParameterError("model")
-
-    if model_name not in env:
-        raise ResourceNotFoundError("Model", model_name)
+    # Whatever it was called, this is what the database calls it. Everything
+    # below — and everything the agent writes afterwards — uses this name.
+    model_name = resolve_model_name(env, model_name)
 
     real_columns = _actual_columns(env.cr, env[model_name]._table)
     column_types = _column_types(env.cr, env[model_name]._table)

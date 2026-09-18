@@ -1,0 +1,73 @@
+/* Copyright (c) 2026, Marwan Badr and contributors
+   For license information, please see LICENSE
+
+   Styled with Odoo's own variables rather than a fixed palette, so the card
+   follows the site's theme instead of inverting badly on a dark one. */
+
+.razyyn_knowledge { width: 100%; }
+
+.razyyn_knowledge_head h4 { margin: 0 0 6px; font-size: 16px; font-weight: 700; }
+.razyyn_knowledge_head p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--o-main-text-color, #6b7280);
+    opacity: .85;
+}
+
+.razyyn_knowledge_muted {
+    color: var(--o-main-text-color, #6b7280);
+    opacity: .7;
+    font-size: 13px;
+}
+
+.razyyn_knowledge_row {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--o-gray-200, #eceff3);
+}
+.razyyn_knowledge_row > label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.razyyn_knowledge_row > small {
+    display: block;
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--o-main-text-color, #6b7280);
+    opacity: .7;
+}
+
+.razyyn_knowledge_control {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+.razyyn_knowledge_control .form-select { max-width: 340px; }
+
+.razyyn_knowledge_doc {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border: 1px solid var(--o-gray-200, #eceff3);
+    border-radius: 10px;
+}
+
+.razyyn_dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+.razyyn_dot.is-good { background: var(--o-success, #28a745); }
+.razyyn_dot.is-idle { background: var(--o-gray-400, #adb5bd); }
+
+.razyyn_knowledge .alert { margin-top: 14px; margin-bottom: 0; font-size: 13px; }

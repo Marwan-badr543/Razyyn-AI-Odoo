@@ -42,3 +42,39 @@ def pick_link_match(text: str, matches):
     if len(matches) == 1:
         return matches[0][0]
     return list(matches)
+
+
+def spellings_of(text: str) -> list:
+    """The ways one reference may have been written, best first.
+
+    A DOCUMENT'S DISPLAYED NAME IS NOT ALWAYS SOMETHING THE VENDOR WILL MATCH.
+        Odoo builds a journal entry's displayed name out of two columns —
+        `MISC/2026/09/0004 (RAZYYN-TEST-B)` is its number and its reference —
+        and `name_search` matches on either column ALONE. It does not match the
+        string it just produced. So the loop failed to close: this module tells
+        the agent a document is called "MISC/2026/09/0004 (RAZYYN-TEST-B)", the
+        agent names it back exactly as it was told, and the module answers that
+        no such record exists.
+
+        It is the same string a person reads off their own screen, which is the
+        other half of the problem: an accountant copying a reference out of Odoo
+        copies the whole of it.
+
+    So a reference that resolves as written is used as written, and only a
+    reference that resolves to NOTHING is retried on its parts. The trailing
+    parenthesis is the only structure looked for, because it is the only one
+    a displayed name is built with here — and a name that happens to contain
+    brackets still gets its literal spelling tried first.
+    """
+    whole = str(text or "").strip()
+    if not whole:
+        return []
+    tried = [whole]
+    if whole.endswith(")") and "(" in whole:
+        head, _, tail = whole.rpartition("(")
+        head = head.strip()
+        tail = tail[:-1].strip()
+        for part in (head, tail):
+            if part and part not in tried:
+                tried.append(part)
+    return tried

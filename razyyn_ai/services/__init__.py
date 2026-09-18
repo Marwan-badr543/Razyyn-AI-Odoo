@@ -16,3 +16,4 @@ from . import ocr
 from . import ocr_service
 from . import chat_turn_service
 from . import agent_messaging_service
+from . import knowledge_service

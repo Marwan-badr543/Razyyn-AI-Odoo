@@ -30,8 +30,10 @@ WHY THE STREAM ENDS ITSELF
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import time
 
 import markupsafe
@@ -56,6 +58,76 @@ POLL_SECONDS = 0.5
 KEEPALIVE = ": keep-alive\n\n"
 
 
+#: THE CHAT PAGE'S ASSETS ARE NOT IN AN ODOO BUNDLE, SO NOTHING FINGERPRINTS
+#: THEM FOR US.
+#:
+#: Odoo serves `/<module>/static/...` with `Cache-Control: public,
+#: max-age=604800`. A browser that opened the chat once keeps those bytes for a
+#: week, whatever the server now holds. The four URLs therefore carry a cache
+#: key -- and for six module versions that key was the string "1.2.0", typed
+#: into the template beside a comment asking whoever changed the assets to
+#: change it too. Nobody did. Customers on 1.7.0 were running the chat window
+#: from 1.2.0: no High Thinking switch, and a thinking badge that still said
+#: "Router" months after it was renamed.
+#:
+#: A cache key a person has to remember to change is a cache key that is wrong.
+#: This one is the SHA-256 of the asset bytes themselves, so it changes when
+#: and only when the assets change -- including on a `git pull` that bumps no
+#: version, and including in --dev mode where an edited file must be picked up
+#: at once.
+_ASSET_FILES = (
+    "static/src/chat/frappe/agent_chat.css",
+    "static/src/chat/razyyn_platform.css",
+    "static/src/chat/razyyn_platform.js",
+    "static/src/chat/frappe/agent_chat.js",
+)
+
+#: (token, signature) -- recomputed only when a file's size or mtime moves.
+#: Hashing 216 KB on every page load would be a needless read; stat-ing four
+#: files is not. The signature catches an edit the version number would miss.
+_asset_token_cache: tuple[str, tuple] | None = None
+
+
+def chat_assets_token() -> str:
+    """The cache key the chat page's four asset URLs carry.
+
+    Derived from the files' own bytes, so it cannot fall behind them.
+    """
+    global _asset_token_cache
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    paths = [os.path.join(here, name) for name in _ASSET_FILES]
+    try:
+        signature = tuple(
+            (os.path.getsize(p), os.path.getmtime(p)) for p in paths
+        )
+    except OSError:
+        # A missing asset is a broken install, not a caching question. Fall
+        # back to the module version so the page still renders and the error
+        # the customer sees is the real one (a 404 on the asset).
+        return _module_version()
+
+    if _asset_token_cache is not None and _asset_token_cache[1] == signature:
+        return _asset_token_cache[0]
+
+    digest = hashlib.sha256()
+    for path in paths:
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(65536), b""):
+                digest.update(block)
+    token = digest.hexdigest()[:16]
+    _asset_token_cache = (token, signature)
+    return token
+
+
+def _module_version() -> str:
+    """The installed module's version, used only when an asset is missing."""
+    module = request.env["ir.module.module"].sudo().search(
+        [("name", "=", "razyyn_ai")], limit=1,
+    )
+    return (module.latest_version or "0").replace(".", "-")
+
+
 class RazyynChatStream(http.Controller):
 
     @http.route("/razyyn/chat", type="http", auth="user", methods=["GET"])
@@ -78,6 +150,9 @@ class RazyynChatStream(http.Controller):
             "boot_json": markupsafe.Markup(json.dumps(boot).replace("<", "\\u003c")),
             "lang": (user.lang or "en_US").replace("_", "-"),
             "direction": "rtl" if (user.lang or "").startswith("ar") else "ltr",
+            # See chat_assets_token: the cache key for the four standalone
+            # assets, derived from their bytes so it can never fall behind them.
+            "assets_token": chat_assets_token(),
         })
         # The page is embedded in Odoo's own client action, so it must be
         # frameable -- but only by this site. Without this it is frameable by

@@ -3,7 +3,7 @@
 
 {
     "name": "Razyyn AI",
-    "version": "18.0.1.7.0",
+    "version": "18.0.1.8.0",
     "summary": "The Razyyn AI accounting agent, inside Odoo: chat, reading, "
                "and governed recording of entries.",
     "description": """
@@ -51,6 +51,13 @@ and neither can drift.
             "razyyn_ai/static/src/backend/chat_action.js",
             "razyyn_ai/static/src/backend/chat_action.xml",
             "razyyn_ai/static/src/backend/chat_action.css",
+            # The company-knowledge card on Agent Settings. In the bundle
+            # rather than standalone because it IS an Odoo form widget: it
+            # renders with Odoo's own controls and should follow Odoo's theme,
+            # which is the opposite of the chat window's situation.
+            "razyyn_ai/static/src/backend/company_knowledge.js",
+            "razyyn_ai/static/src/backend/company_knowledge.xml",
+            "razyyn_ai/static/src/backend/company_knowledge.css",
         ],
     },
     # NO "external_dependencies" HERE, AND IT MUST NOT BE ADDED.
