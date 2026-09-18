@@ -48,6 +48,15 @@
                         <field name="write_recording_enabled"/>
                     </group>
                     <notebook>
+                        <page string="Company Knowledge">
+                            <!-- Beside the connection it applies to, exactly
+                                 as on ERPNext. The widget fetches what it
+                                 shows from the platform; the field it sits on
+                                 holds nothing. -->
+                            <field name="company_knowledge"
+                                   widget="razyyn_company_knowledge"
+                                   nolabel="1" colspan="2"/>
+                        </page>
                         <page string="Description &amp; Diagnostics">
                             <group>
                                 <field name="write_last_error" readonly="1"/>

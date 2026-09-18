@@ -185,3 +185,39 @@ class LinkTargetNaming(unittest.TestCase):
 
     def test_one_partial_match_is_taken(self):
         self.assertEqual(self._pick("Suspense", [(3, "Bank Suspense Account")]), 3)
+
+
+class DisplayedNamesResolve(unittest.TestCase):
+    """A reference written the way the screen shows it must still find its record.
+
+    Odoo builds a journal entry's displayed name from two columns —
+    ``MISC/2026/09/0004 (RAZYYN-TEST-B)`` is the number and the reference — and
+    its own ``name_search`` matches either column ALONE, never the string it
+    just produced. So the loop did not close: this module told the agent a
+    document was called that, the agent named it back exactly as told, and the
+    module answered that no such record existed. It is also what an accountant
+    copies off their own screen.
+    """
+
+    def test_a_plain_reference_is_tried_as_written_and_nothing_else(self):
+        self.assertEqual(link_match.spellings_of("MISC/2026/09/0004"),
+                         ["MISC/2026/09/0004"])
+
+    def test_a_displayed_name_falls_back_to_its_parts(self):
+        self.assertEqual(
+            link_match.spellings_of("MISC/2026/09/0004 (RAZYYN-TEST-B)"),
+            ["MISC/2026/09/0004 (RAZYYN-TEST-B)", "MISC/2026/09/0004", "RAZYYN-TEST-B"],
+        )
+
+    def test_the_literal_spelling_always_comes_first(self):
+        """A record genuinely named "Acme (Holdings)" must match itself before
+        anything is retried on a fragment of its name."""
+        self.assertEqual(link_match.spellings_of("Acme (Holdings)")[0], "Acme (Holdings)")
+
+    def test_brackets_that_are_not_a_suffix_are_left_alone(self):
+        self.assertEqual(link_match.spellings_of("Bank (USD) account"),
+                         ["Bank (USD) account"])
+
+    def test_nothing_is_nothing(self):
+        self.assertEqual(link_match.spellings_of(""), [])
+        self.assertEqual(link_match.spellings_of(None), [])

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="razyyn_ai.CompanyKnowledge">
+        <div class="razyyn_knowledge">
+
+            <div t-if="state.loading" class="razyyn_knowledge_muted">
+                Loading your company knowledge...
+            </div>
+
+            <t t-else="">
+                <div class="razyyn_knowledge_head">
+                    <h4>Company accounting knowledge</h4>
+                    <p>
+                        What the agent should know about how YOUR business keeps its
+                        books — your accounting policy, your approval rules, your
+                        chart conventions — and the country whose requirements apply.
+                        It reads these before answering questions about your own rules.
+                    </p>
+                </div>
+
+                <!-- Country -->
+                <div class="razyyn_knowledge_row">
+                    <label for="razyyn_country">Country whose accounting rules apply</label>
+                    <div class="razyyn_knowledge_control">
+                        <select id="razyyn_country" class="form-select"
+                                t-on-change="onCountryChange">
+                            <option t-if="!state.countries.length" value="">
+                                (the platform sent no country list)
+                            </option>
+                            <t t-foreach="state.countries" t-as="c" t-key="c.code">
+                                <option t-att-value="c.code"
+                                        t-att-selected="c.code === state.country">
+                                    <t t-esc="c.name"/> (<t t-esc="c.code"/>)
+                                </option>
+                            </t>
+                        </select>
+                        <button class="btn btn-secondary"
+                                t-att-disabled="!countryChanged or state.busy"
+                                t-on-click="saveCountry">Save</button>
+                    </div>
+                    <small>
+                        The agent applies this country's requirements over general
+                        accounting guidance.
+                    </small>
+                </div>
+
+                <!-- What is indexed -->
+                <div class="razyyn_knowledge_row">
+                    <label>Your accounting policy</label>
+                    <div t-if="state.policy" class="razyyn_knowledge_doc">
+                        <div>
+                            <span class="razyyn_dot is-good"/>
+                            <strong t-esc="state.policy.title"/>
+                            <div class="razyyn_knowledge_muted">
+                                In use by the agent ·
+                                <t t-esc="state.policy.page_count"/> pages ·
+                                <t t-esc="state.policy.chunk_count"/> searchable sections
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary btn-sm"
+                                t-att-disabled="state.busy"
+                                t-on-click="removePolicy">Remove</button>
+                    </div>
+                    <div t-else="" class="razyyn_knowledge_doc">
+                        <div>
+                            <span class="razyyn_dot is-idle"/>
+                            <strong>No policy uploaded yet</strong>
+                            <div class="razyyn_knowledge_muted">
+                                The agent will work from your ledger and general
+                                accounting practice until you add one.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Upload -->
+                <div class="razyyn_knowledge_row">
+                    <input type="file" t-ref="file" accept=".pdf,application/pdf"
+                           class="d-none" t-on-change="onFileChosen"/>
+                    <div class="razyyn_knowledge_control">
+                        <button class="btn btn-secondary" t-att-disabled="state.busy"
+                                t-on-click="chooseFile">Choose a PDF</button>
+                        <span class="razyyn_knowledge_muted"
+                              t-esc="state.chosenFile or 'No file chosen'"/>
+                        <button class="btn btn-primary"
+                                t-att-disabled="!state.chosenFile or state.busy"
+                                t-on-click="uploadPolicy">
+                            <t t-if="state.policy">Replace policy</t>
+                            <t t-else="">Upload policy</t>
+                        </button>
+                        <span class="razyyn_knowledge_muted" t-esc="state.progress"/>
+                    </div>
+                    <small>
+                        Searchable text PDF, up to 40 MB. Scans and photographs of
+                        pages are not accepted — the agent reads the text, it does
+                        not look at the picture. Uploading a new PDF replaces the
+                        current one, which stops being used immediately.
+                    </small>
+                </div>
+
+                <div t-if="state.error" class="alert alert-danger" t-esc="state.error"/>
+                <div t-if="state.notice" class="alert alert-success" t-esc="state.notice"/>
+            </t>
+        </div>
+    </t>
+
+</templates>

@@ -67,6 +67,23 @@ class AgentSettings(models.Model):
         string="Custom Instructions",
         help="Accountant system prompt instructions sent with every chat turn.",
     )
+    #: THE CARD HAS NOWHERE TO LIVE UNLESS A FIELD PUTS IT THERE.
+    #:
+    #: An Odoo form renders fields, so a widget needs one to hang on. This one
+    #: holds nothing and is never read: the company's policy and its country
+    #: live on the platform, which is what reads them at answer time. Storing
+    #: a copy here would be a second answer to the same question, and the two
+    #: would disagree the first time either changed.
+    company_knowledge = fields.Char(
+        string="Company Accounting Knowledge", store=False, readonly=True,
+        compute="_compute_company_knowledge",
+        help="Your accounting policy and the country whose rules the agent "
+             "applies. Both are held by Razyyn AI, not in this database.",
+    )
+
+    def _compute_company_knowledge(self):
+        for record in self:
+            record.company_knowledge = False
     erp_connection_id = fields.Char(
         string="ERP Connection ID",
         help="Connection UUID registered with the platform.",

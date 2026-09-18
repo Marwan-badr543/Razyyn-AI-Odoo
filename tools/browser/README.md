@@ -72,3 +72,25 @@ Both suites exit non-zero on failure and write screenshots to `$SHOTS` (default
 `PW`. The account needs the Razyyn AI Manager group to reach the governance
 menus — an ordinary employee is not shown them, which is itself the behaviour
 `acceptance.js` would catch if it regressed.
+
+## settings_and_composer.js
+
+The three things on screen that no HTTP check can see: the company-knowledge
+card on Agent Settings, the **High Thinking** switch beside **Scan & Extract
+Data** in the chat composer, and the thinking badge reading **Finance Manager**.
+
+Each of the three was reported missing while the code that draws it was present
+and correct — a widget that throws leaves a blank tab, and the chat's assets
+were cached by URL for a week, so a customer on 1.7.0 was running the chat
+window from 1.2.0. All three were perfect over HTTP.
+
+```bash
+node settings_and_composer.js                            # Odoo 17 on 8069
+BASE=http://localhost:8078 node settings_and_composer.js # Odoo 18
+```
+
+The account it signs in as must hold **Razyyn AI Accountant / Manager** — the
+card under test is on the connection form, which is Manager-only. Override the
+default with `LOGIN=` and `PW=`.
+
+9/9 on both series.
