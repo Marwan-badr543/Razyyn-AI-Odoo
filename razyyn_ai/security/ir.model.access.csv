@@ -1,0 +1,14 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_razyyn_settings_user,razyyn.agent.settings.user,model_razyyn_agent_settings,base.group_user,1,1,1,1
+access_razyyn_settings_manager,razyyn.agent.settings.manager,model_razyyn_agent_settings,group_razyyn_manager,1,1,1,1
+access_razyyn_session_user,razyyn.agent.chat.session.user,model_razyyn_agent_chat_session,base.group_user,1,1,1,1
+access_razyyn_session_manager,razyyn.agent.chat.session.manager,model_razyyn_agent_chat_session,group_razyyn_manager,1,1,1,1
+access_razyyn_message_user,razyyn.agent.chat.message.user,model_razyyn_agent_chat_message,base.group_user,1,1,1,1
+access_razyyn_message_manager,razyyn.agent.chat.message.manager,model_razyyn_agent_chat_message,group_razyyn_manager,1,1,1,1
+access_razyyn_write_policy_manager,razyyn.agent.write.policy.manager,model_razyyn_agent_write_policy,group_razyyn_manager,1,1,1,1
+access_razyyn_write_log_manager,razyyn.agent.write.log.manager,model_razyyn_agent_write_log,group_razyyn_manager,1,1,1,1
+access_razyyn_messaging_settings_manager,razyyn.agent.messaging.settings.manager,model_razyyn_agent_messaging_settings,group_razyyn_manager,1,1,1,1
+access_razyyn_messaging_destination_manager,razyyn.agent.messaging.destination.manager,model_razyyn_agent_messaging_destination,group_razyyn_manager,1,1,1,1
+access_razyyn_message_log_manager,razyyn.agent.message.log.manager,model_razyyn_agent_message_log,group_razyyn_manager,1,1,1,1
+access_razyyn_chat_event_user,razyyn.agent.chat.event.user,model_razyyn_agent_chat_event,base.group_user,1,1,1,0
+access_razyyn_chat_event_manager,razyyn.agent.chat.event.manager,model_razyyn_agent_chat_event,group_razyyn_manager,1,1,1,1

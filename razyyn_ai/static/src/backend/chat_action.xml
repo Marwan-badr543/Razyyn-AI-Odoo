@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- GENERATED from the Odoo 17 module by tools/sync_to_odoo18.py.
+     Edit razyyn-odoo-17/razyyn_ai/chat_action.xml and re-run that script;
+     changes made here are overwritten. -->
+<templates xml:space="preserve">
+
+    <t t-name="razyyn_ai.ChatAction">
+        <div class="razyyn_chat_action o_action">
+            <iframe t-ref="frame"
+                    class="razyyn_chat_frame"
+                    src="/razyyn/chat"
+                    title="Razyyn AI"
+                    allow="clipboard-write"/>
+        </div>
+    </t>
+
+</templates>

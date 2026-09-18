@@ -1,0 +1,14 @@
+# What Razyyn AI needs from PyPI beyond what Odoo already ships.
+#
+# YOU DO NOT NORMALLY RUN THIS. Installing the module fetches these itself --
+# see razyyn_ai/services/dependencies.py and the post_init_hook. The file is
+# here for deployments that install a module's requirements themselves
+# (odoo.sh, a Docker build step, a locked-down server with no outbound PyPI at
+# install time), and it is checked against that module by
+# tests/test_dependencies.py so the two cannot drift.
+#
+# Neither of these can be supplied by pip, and neither is installed for you:
+#   sudo apt-get install -y tesseract-ocr tesseract-ocr-ara poppler-utils
+
+pytesseract
+pdf2image

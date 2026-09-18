@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- GENERATED from the Odoo 17 module by tools/sync_to_odoo18.py.
+     Edit razyyn-odoo-17/razyyn_ai/agent_write_policy_views.xml and re-run that script;
+     changes made here are overwritten. -->
+<odoo>
+    <!-- Razyyn Agent Write Policy Form View -->
+    <record id="view_razyyn_agent_write_policy_form" model="ir.ui.view">
+        <field name="name">razyyn.agent.write.policy.form</field>
+        <field name="model">razyyn.agent.write.policy</field>
+        <field name="arch" type="xml">
+            <!-- create="0" delete="0": one policy, and the model refuses a
+                 second — a New button here could only ever produce an error. -->
+            <form string="Agent Write Policy" create="0" delete="0">
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" placeholder="Policy Name"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group string="Global Switches">
+                            <field name="enabled"/>
+                            <field name="dry_run_only"/>
+                            <field name="require_approval"/>
+                            <field name="restrict_to_listed_models"/>
+                        </group>
+                        <group string="Financial &amp; Date Caps">
+                            <field name="max_amount_per_doc"/>
+                            <field name="max_daily_amount"/>
+                            <field name="max_documents_per_batch"/>
+                            <field name="earliest_posting_date"/>
+                            <field name="latest_posting_date"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Allowed Models">
+                            <field name="allowed_model_ids">
+                                <list>
+                                    <field name="model"/>
+                                    <field name="name"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Allowed Companies">
+                            <field name="allowed_company_ids">
+                                <list>
+                                    <field name="name"/>
+                                    <field name="currency_id"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Blocked Accounts">
+                            <!-- Code and name only, deliberately. An account's
+                                 company is spelled `company_id` on Odoo 17 and
+                                 `company_ids` on Odoo 18, where account.account
+                                 became many-to-many against companies — and a
+                                 view naming a field the model does not have
+                                 aborts the whole module install rather than
+                                 degrading. Naming neither keeps this file
+                                 identical on both series, which is worth more
+                                 than a decorative column: the account's own
+                                 code already identifies it, and which company
+                                 it belongs to is on the account itself. -->
+                            <field name="blocked_account_ids">
+                                <list>
+                                    <field name="code"/>
+                                    <field name="name"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Razyyn Agent Write Policy Tree View -->
+    <record id="view_razyyn_agent_write_policy_tree" model="ir.ui.view">
+        <field name="name">razyyn.agent.write.policy.tree</field>
+        <field name="model">razyyn.agent.write.policy</field>
+        <field name="arch" type="xml">
+            <list string="Agent Write Policies">
+                <field name="name"/>
+                <field name="enabled"/>
+                <field name="dry_run_only"/>
+                <field name="require_approval"/>
+                <field name="max_amount_per_doc"/>
+                <field name="max_daily_amount"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Action -->
+    <!-- Opens the policy itself rather than a list of one row, for the same
+         reason the messaging configuration does: the only thing a second
+         policy record can do is be tightened carefully and then ignored. -->
+    <record id="action_razyyn_agent_write_policy" model="ir.actions.server">
+        <field name="name">Write Governance Policy</field>
+        <field name="model_id" ref="model_razyyn_agent_write_policy"/>
+        <field name="state">code</field>
+        <field name="code">action = model.action_open_policy()</field>
+    </record>
+</odoo>

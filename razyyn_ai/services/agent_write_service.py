@@ -1,0 +1,1273 @@
+# Copyright (c) 2026, Marwan Badr and contributors
+# For license information, please see LICENSE
+
+"""Odoo's implementation of the Razyyn write-gateway protocol.
+
+WHAT THIS FILE OWES THE AGENT
+    The agent reaches every ERP through one client
+    (``agent/agent_create/adapters/gateway.py``) and seven endpoints. That
+    client is not negotiable from here: it is the same code that writes into
+    ERPNext ledgers in production, and it reads particular keys out of
+    particular replies. This file's whole job is to answer those seven calls in
+    the shapes it reads.
+
+    An earlier revision answered in shapes of its own — ``report`` where the
+    client reads ``preflight``, ``issues`` where it reads ``findings``, a list
+    of wrappers where it reads a list of records. Nothing raised. The agent
+    simply found no accounts, had no validation findings and wrote nothing,
+    which is the worst way for an integration to break, because it looks like
+    an empty database rather than a bug.
+
+THE PROTOCOL'S VOCABULARY IS NOT ODOO'S, AND THAT IS DELIBERATE
+    On the wire a model is a ``doctype``, a record is a ``docname``, and where
+    a document stands is a ``docstatus`` of 0/1/2. Those words came from the
+    protocol's first implementation. Renaming a live wire format across three
+    repositories buys nothing, so instead this file is the ONE place Odoo's own
+    words are translated into them — ``account.move`` into a doctype,
+    ``state='posted'`` into docstatus 1, ``many2one`` into ``Link``.
+
+    The field-type translation matters more than it looks. The agent decides
+    whether a field needs an existing record looked up by asking whether its
+    type is ``Link``, and whether a value is money by asking whether it is
+    ``Currency``. An Odoo ``many2one`` reported as "many2one" is a field the
+    agent will never resolve a customer into; a ``monetary`` reported as
+    "monetary" is an amount it will never recognise as an amount.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Mapping, Optional, Sequence
+
+from odoo import fields as odoo_fields
+
+from .link_match import pick_link_match
+from .write_guard import (
+    AgentWriteError,
+    MissingParameterError,
+    ResourceNotFoundError,
+    WriteRejectedError,
+    check_write_policy,
+)
+
+logger = logging.getLogger(__name__)
+
+#: The most documents one request may carry. Matches the agent's own
+#: ``AdapterCapabilities.max_batch_size``, which is what it chunks a large
+#: import at — a lower number here silently refuses whole chunks.
+MAX_BATCH_SIZE = 50
+
+#: Odoo field type -> the protocol's type name. Anything unlisted falls back to
+#: ``Data``, which is the harmless direction: the agent treats it as free text
+#: and asks, rather than assuming.
+_FIELD_TYPES: dict[str, str] = {
+    "char": "Data",
+    "text": "Text",
+    "html": "Text Editor",
+    "integer": "Int",
+    "float": "Float",
+    "monetary": "Currency",
+    "boolean": "Check",
+    "date": "Date",
+    "datetime": "Datetime",
+    "selection": "Select",
+    "many2one": "Link",
+    "one2many": "Table",
+    "many2many": "Table MultiSelect",
+    "binary": "Attach",
+    "json": "JSON",
+}
+
+#: Odoo's own state values in the protocol's 0/1/2 encoding.
+#:
+#: Odoo has no single ``docstatus`` column, and what a posted document's state
+#: is called differs per model (``posted`` on a journal entry, ``sale`` on a
+#: sales order, ``done`` on a delivery). The agent must learn none of those
+#: words: it has four states, and this is where a model's own vocabulary
+#: becomes one of them.
+#:
+#: KNOWN APPROXIMATION, stated rather than left looking authoritative. These
+#: are the spellings Odoo's own accounting, sales and inventory models use, and
+#: they are right for every model the agent writes to today. They are a guess
+#: about VOCABULARY, though, not a fact: a module this connector has never seen
+#: could use ``done`` to mean something that is not "final", and such a
+#: document would read back as posted when it is not. The safe direction is the
+#: one taken below — anything unrecognised falls to DRAFT, so an unknown state
+#: is never reported to a customer as posted. Extend this map when a customer's
+#: own module needs it; do not widen it by guessing.
+_DRAFT, _POSTED, _CANCELLED = 0, 1, 2
+_STATE_CODES: dict[str, int] = {
+    "draft": _DRAFT,
+    "posted": _POSTED,
+    "done": _POSTED,
+    "sale": _POSTED,
+    "purchase": _POSTED,
+    "paid": _POSTED,
+    "cancel": _CANCELLED,
+    "cancelled": _CANCELLED,
+}
+
+#: How a document gets posted, in the order Odoo's own buttons are tried.
+_POST_ACTIONS = ("action_post", "button_post", "action_confirm", "action_validate")
+
+#: How a document gets cancelled.
+_CANCEL_ACTIONS = ("button_cancel", "action_cancel")
+
+#: Bookkeeping columns that are Odoo's to write, never the agent's.
+_SYSTEM_FIELDS = frozenset({
+    "id", "__last_update", "display_name",
+    "create_uid", "create_date", "write_uid", "write_date",
+})
+
+#: Model namespaces that are Odoo's plumbing rather than a customer's books.
+#:
+#: Every Odoo business model inherits `mail.thread` and `mail.activity.mixin`,
+#: which bolt on a dozen relations — followers, activities, message threads,
+#: attachments, website visitors. A journal entry therefore declares child
+#: tables for `mail.activity` and `ir.attachment` alongside its actual lines.
+#:
+#: Listing them is not merely untidy. The spec is what the agent is SHOWN
+#: before it composes a document, and a model handed `activity_ids` and
+#: `message_ids` beside `line_ids` has three plausible places to put the rows
+#: of an invoice. Cutting them is what makes `line_ids` the obvious one.
+_FRAMEWORK_NAMESPACES = ("mail.", "ir.", "bus.", "utm.", "website.", "digest.")
+
+
+def _is_framework(comodel: str) -> bool:
+    return bool(comodel) and comodel.startswith(_FRAMEWORK_NAMESPACES)
+
+
+def _is_writable(field) -> bool:
+    """Whether a value the agent writes for this field would actually be kept.
+
+    THE OLD RULES HID HALF OF A JOURNAL ENTRY, and the failure they caused is
+    worth recording. They dropped every computed field without an inverse and
+    every readonly field — reasonable-sounding, and wrong for modern Odoo,
+    where the accounting documents are built almost entirely out of two
+    patterns those rules cannot see:
+
+      * ``compute=..., store=True, readonly=False`` — Odoo's own "derived
+        default the user may override": a written value is stored and WINS
+        over the compute. ``account.move.date`` and ``account.move.line.name``
+        are exactly this.
+      * a plain stored field with ``readonly=True`` — a UI hint only since
+        Odoo 16; the ORM accepts the value at create. ``account.move.
+        move_type`` (readonly, required, default "entry") is the field that
+        decides what KIND of document a move is, and a spec without it cannot
+        describe an invoice at all.
+
+    Both were left out of the published spec, so the platform's own field
+    check refused every correct journal entry ("account.move has no 'date'
+    field"), the agent re-read the live schema, saw that the field plainly
+    exists, sent the same correct payload again, and looped until the customer
+    cancelled. The spec and the database must never disagree about a field
+    that is really there.
+
+    What still stays out is the one thing Odoo genuinely discards: a computed
+    field that is neither stored-and-editable nor invertible — writing it does
+    nothing, so offering it invites a value that vanishes silently.
+    """
+    if field.inverse:
+        return True
+    if field.compute:
+        return bool(field.store and not field.readonly)
+    return True
+
+#: "update" AND "amend" ARE NOT THE SAME WORD TWICE. An amendment supersedes a
+#: document that has already been POSTED — it is reversed and a corrected
+#: successor takes its place. An update edits a DRAFT, which nothing has been
+#: recorded from, so the record itself changes and there is nothing to
+#: supersede. Collapsing them would let a request to fix a typo reverse a
+#: posted entry.
+_VALID_ACTIONS = ("create", "update", "submit", "cancel", "amend")
+
+
+# ─── Translating between Odoo and the protocol ───────────────────────────────
+
+
+def _docstatus(record) -> int:
+    """Where *record* stands, in the protocol's encoding.
+
+    A model with no ``state`` field is not "unknown" — it is a master record
+    that is simply saved, which the protocol calls a draft. That is the same
+    answer Frappe gives for a DocType that is not submittable.
+    """
+    state = getattr(record, "state", None)
+    if not state:
+        return _DRAFT
+    return _STATE_CODES.get(str(state).lower(), _DRAFT)
+
+
+def _is_submittable(model) -> bool:
+    """Whether this model has a posting step at all.
+
+    Asked of the model's own behaviour rather than of a list of model names: a
+    customer's installed modules include ones this connector has never heard
+    of, and a hard-coded list answers "no" for every one of them — which tells
+    the agent the document needs no posting and leaves the entry in draft.
+    """
+    return any(hasattr(model, action) for action in _POST_ACTIONS)
+
+
+def _field_spec(field_name: str, field) -> dict[str, Any]:
+    """One field, in the shape the client's ``_field`` reads.
+
+    ``reqd``, not ``required``: the client reads the Frappe spelling, and a
+    correctly-populated ``required`` key it never looks at is how every
+    mandatory field on Odoo came back optional.
+    """
+    options: Optional[str] = None
+    if field.type in ("many2one", "one2many", "many2many"):
+        options = field.comodel_name
+    elif field.type == "selection":
+        # Newline-separated, which is how the protocol carries a choice list
+        # and what the agent's prompt renderer splits on.
+        try:
+            options = "\n".join(str(value) for value, _label in (field.selection or []))
+        except (TypeError, ValueError):
+            options = None
+
+    return {
+        "fieldname": field_name,
+        "label": field.string or field_name,
+        "fieldtype": _FIELD_TYPES.get(field.type, "Data"),
+        # "Required" here means REQUIRED OF THE AGENT. A field Odoo fills in
+        # by itself — a default, a compute, a related value — must not be
+        # demanded of a payload: marking `auto_post` (required, default "no")
+        # as reqd made the platform insist on a value Odoo was always going
+        # to supply, on every single journal entry.
+        "reqd": bool(field.required and field.default is None
+                     and not field.compute and not field.related),
+        # Read-only in the protocol means "the system derives this; do not
+        # write it". Odoo's readonly flag has been a pure UI hint since v16,
+        # so it maps to the protocol only on derived fields; a plain stored
+        # field marked readonly (move_type) is genuinely the agent's to set.
+        "read_only": bool(field.readonly and (field.compute or field.related)),
+        "options": options,
+        "default": None,
+    }
+
+
+def _readable(exc: Exception) -> str:
+    """An Odoo exception as one sentence an accountant could act on."""
+    args = getattr(exc, "args", None)
+    text = str(args[0] if args else exc).strip()
+    return " ".join(text.split())[:400] or "This document was refused."
+
+
+# ─── get_document_spec ───────────────────────────────────────────────────────
+
+
+def build_document_spec(env, doctype: str) -> dict[str, Any]:
+    """The field contract for one model, so the agent never guesses a name."""
+    if not doctype:
+        raise MissingParameterError("Document type is required.")
+    if doctype not in env:
+        raise ResourceNotFoundError(f"'{doctype}' is not a model in this Odoo system.")
+
+    model = env[doctype]
+    fields_spec: list[dict[str, Any]] = []
+    child_tables: list[dict[str, Any]] = []
+
+    for name, field in sorted(model._fields.items()):
+        if name in _SYSTEM_FIELDS or not _is_writable(field):
+            continue
+        if name == "state":
+            # The lifecycle column. The protocol carries lifecycle as ACTIONS
+            # — submit posts, cancel reverses — and reads it back as
+            # docstatus. A payload that wrote `state` directly would mark a
+            # document posted without any of the posting logic running.
+            continue
+        if _is_framework(getattr(field, "comodel_name", "") or ""):
+            continue
+
+        if field.type == "one2many":
+            comodel = field.comodel_name
+            child_fields = []
+            if comodel and comodel in env:
+                for cname, cfield in sorted(env[comodel]._fields.items()):
+                    if cname in _SYSTEM_FIELDS or cfield.type == "one2many":
+                        continue
+                    if not _is_writable(cfield):
+                        continue
+                    if _is_framework(getattr(cfield, "comodel_name", "") or ""):
+                        continue
+                    child_fields.append(_field_spec(cname, cfield))
+            child_tables.append({
+                "fieldname": name,
+                "label": field.string or name,
+                # `child_doctype`, not `child_type`: the client reads the
+                # former. The latter arrived as None, so every line of every
+                # journal entry was described to the model with no field list
+                # at all — and the model then invented column names.
+                "child_doctype": comodel,
+                "fields": child_fields,
+            })
+            continue
+
+        fields_spec.append(_field_spec(name, field))
+
+    return {
+        # THIS SYSTEM'S OWN SPELLING, NOT THE CALLER'S. A caller's words are
+        # not an identifier here; `_name` is what this model is actually
+        # called, and it is what every later read must address.
+        "doctype": model._name,
+        "is_submittable": _is_submittable(model),
+        "fields": fields_spec,
+        "child_tables": child_tables,
+    }
+
+
+# ─── search_documents ────────────────────────────────────────────────────────
+
+
+def _states_for(docstatus: Sequence[Any]) -> list[str]:
+    """The Odoo state values matching a protocol docstatus filter."""
+    wanted: list[str] = []
+    for code in docstatus or ():
+        try:
+            code_int = int(code)
+        except (TypeError, ValueError):
+            continue
+        wanted.extend(name for name, value in _STATE_CODES.items() if value == code_int)
+    return wanted
+
+
+def search_documents(
+    env,
+    doctypes: Sequence[str],
+    text: str = "",
+    docstatus: Sequence[Any] = (),
+    limit: int = 10,
+    company: str = "",
+) -> dict[str, Any]:
+    """Existing records the agent may need to point at.
+
+    Never raises for finding nothing. A model this database does not have is
+    reported under ``unavailable`` with a reason, because "you do not have
+    Sales installed" and "you have no sales orders" are different answers and
+    the agent says different things about them.
+    """
+    documents: list[dict[str, Any]] = []
+    unavailable: list[dict[str, Any]] = []
+    total = 0
+    wanted_states = _states_for(docstatus)
+
+    for raw in doctypes or ():
+        doctype = str(raw).strip()
+        if not doctype:
+            continue
+        if doctype not in env:
+            unavailable.append({"doctype": doctype, "reason": "NOT_INSTALLED"})
+            continue
+
+        model = env[doctype].sudo()
+        domain: list[Any] = []
+        if company and "company_id" in model._fields:
+            domain.append(("company_id.name", "ilike", company))
+        if wanted_states and "state" in model._fields:
+            domain.append(("state", "in", wanted_states))
+
+        try:
+            if text:
+                # `name_search` is Odoo's own "find the record a person means".
+                # It looks at whatever each model has decided identifies it —
+                # an account's code, a partner's reference, an invoice's number
+                # — not only a column literally called `name`. Searching
+                # `name ilike` instead is why an account search by code found
+                # nothing: on account.account the code lives in `code`, and
+                # plenty of models have no `name` column at all.
+                pairs = model.name_search(name=text, args=domain, limit=limit)
+                records = model.browse([rid for rid, _label in pairs])
+                matched = len(records)
+            else:
+                records = model.search(domain, limit=limit)
+                matched = model.search_count(domain)
+        except Exception as exc:  # noqa: BLE001 — one bad model must not sink the search
+            logger.info("Could not search %s: %s", doctype, exc)
+            unavailable.append({"doctype": doctype, "reason": "SEARCH_FAILED"})
+            continue
+
+        total += matched
+        for record in records:
+            company_name = _company_of(record)
+            documents.append({
+                "doctype": doctype,
+                # The id as a string: `docname` is what the agent sends back to
+                # act on this record, and Odoo identifies a record by its id.
+                "docname": str(record.id),
+                "label": record.display_name,
+                "docstatus": _docstatus(record),
+                "company": company_name,
+            })
+
+    return {"documents": documents, "unavailable": unavailable, "total_matched": total}
+
+
+def read_document_state(env, doctype: str, docname: str) -> dict[str, Any] | None:
+    """ONE record, addressed by its own reference, or None if there is no such one.
+
+    WHY THIS IS NOT A SEARCH. `search_documents` widens what it is given, so
+    that somebody who half-remembered a name still finds their paperwork, and
+    it answers with a page of the most recent matches. Both are right for
+    offering a person a choice and wrong for looking a reference up: a caller
+    that matches the reference exactly against a truncated page finds nothing
+    and reports, with complete confidence, that the record does not exist.
+
+    Answered in the same shape every other document route answers in, so the
+    caller reads one thing whichever route found it.
+    """
+    if not doctype or not docname:
+        raise MissingParameterError("Missing doctype or document name.")
+    if doctype not in env:
+        return None
+
+    record = _addressed(env, doctype, docname)
+    if not record:
+        return None
+
+    return {
+        "doctype": doctype,
+        "docname": str(record.id),
+        "label": record.display_name,
+        "docstatus": _docstatus(record),
+        "company": _company_of(record),
+        "amount": _record_amount(record),
+    }
+
+
+def _company_of(record) -> str:
+    """Which company this record belongs to, by name, or nothing.
+
+    Nothing is the honest answer for the models that have no company — a
+    partner, a product — rather than this system's default, which would put a
+    company name on a document that does not have one.
+    """
+    if "company_id" in record._fields and record.company_id:
+        return record.company_id.name
+    return ""
+
+
+def _record_amount(record) -> float | None:
+    """The headline figure a person recognises a document by, or nothing."""
+    for name in ("amount_total_signed", "amount_total", "amount", "price_total"):
+        if name in record._fields:
+            try:
+                value = float(record[name] or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value:
+                return value
+    return None
+
+
+# ─── get_write_policy ────────────────────────────────────────────────────────
+
+
+def load_write_policy(env) -> dict[str, Any]:
+    """The customer's own rules about what the agent may record."""
+    policy = env["razyyn.agent.write.policy"].sudo().get_policy_singleton()
+    return {
+        "enabled": bool(policy.enabled),
+        "dry_run_only": bool(policy.dry_run_only),
+        "require_approval": bool(policy.require_approval),
+        # `allowed_document_types` is the key the client reads. An
+        # `allowed_models` key it never looks at leaves the agent believing
+        # every document type is permitted, and discovering otherwise only
+        # when a write is refused mid-run.
+        "allowed_document_types": (
+            [m.model for m in policy.allowed_model_ids]
+            if policy.restrict_to_listed_models else []
+        ),
+        "allowed_companies": [c.name for c in policy.allowed_company_ids],
+        "max_documents_per_run": policy.max_documents_per_run or 0,
+        "max_total_amount_per_run": policy.max_total_amount_per_run or 0.0,
+    }
+
+
+# ─── get_write_log / list_documents ──────────────────────────────────────────
+
+
+def get_write_log(env, idempotency_key: str) -> dict[str, Any]:
+    """What happened to one write, looked up by its idempotency key.
+
+    The agent's only recovery path after a request whose answer never arrived.
+    It has to tell "committed" apart from "we have no record of this", so a
+    missing entry answers ``found: False`` rather than nothing at all.
+    """
+    if not idempotency_key:
+        return {"found": False}
+
+    log = env["razyyn.agent.write.log"].sudo().search(
+        [("idempotency_key", "=", idempotency_key)], limit=1
+    )
+    if not log:
+        return {"found": False}
+
+    # THIS IS THE RECOVERY PATH, so the document has to be findable from it.
+    # It answers the agent after a request whose reply never arrived, and the
+    # receipt built from it is the only thing the customer will be shown about
+    # a document that WAS written. An answer naming nothing but an internal id
+    # leaves them with a document they cannot look up.
+    identity = {}
+    if log.target_model and log.target_record_id:
+        identity = read_document_state(
+            env, log.target_model, str(log.target_record_id),
+        ) or {}
+
+    return {
+        "found": True,
+        # `COMMITTED` is the one value the client acts on. Anything else means
+        # "do not report this as written", which is right for a row still in
+        # flight and for one that failed.
+        "status": "COMMITTED" if log.status == "success" else str(log.status or "").upper(),
+        "target_doctype": log.target_model or "",
+        "target_docname": str(log.target_record_id or ""),
+        "docstatus_written": log.docstatus_written,
+        "action": log.action_type or "",
+        "label": identity.get("label") or "",
+        "company": identity.get("company") or "",
+    }
+
+
+def list_agent_documents(env, limit: int = 20, doctype: str = "") -> list[dict[str, Any]]:
+    """Documents this agent recorded, newest first.
+
+    Also how the agent reads a batch back: rather than one lookup per document
+    it asks for its own recent writes and matches on (doctype, docname). Both
+    keys therefore have to be spelled the protocol's way here.
+    """
+    domain = [("status", "=", "success")]
+    if doctype:
+        domain.append(("target_model", "=", doctype))
+
+    logs = env["razyyn.agent.write.log"].sudo().search(
+        domain, limit=max(1, int(limit)), order="timestamp desc, id desc"
+    )
+    return [
+        {
+            "doctype": log.target_model or "",
+            "docname": str(log.target_record_id or ""),
+            "docstatus": log.docstatus_written,
+            "action": log.action_type or "",
+            "session_id": log.session_id or "",
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        }
+        for log in logs
+    ]
+
+
+# ─── preflight ───────────────────────────────────────────────────────────────
+
+_BLOCKING = "BLOCKING"
+
+
+def _finding(field_path: str, message: str, severity: str = _BLOCKING) -> dict[str, str]:
+    return {"field_path": field_path, "human_message": message, "severity": severity}
+
+
+def _rows_of(raw: Any) -> list[dict[str, Any]]:
+    """Child rows as plain dicts, whatever shape they arrived in.
+
+    The agent sends a plain list of objects, because that is what a language
+    model can reliably produce. Odoo's ORM wants ``(0, 0, values)`` commands.
+    Both are read here, so a payload written either way works.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+        elif isinstance(item, (list, tuple)) and len(item) >= 3 and isinstance(item[2], Mapping):
+            rows.append(dict(item[2]))
+    return rows
+
+
+def _balance_findings(env, model, values: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Double-entry lines that do not balance.
+
+    Found by SHAPE, never by model name. A hard-coded ``account.move`` check
+    misses every localisation and custom module that also posts debits and
+    credits, and it is exactly the rule that has to be rewritten the first time
+    a customer installs something this connector has not heard of.
+    """
+    out: list[dict[str, str]] = []
+    for field_name, field in model._fields.items():
+        if field.type != "one2many" or field_name not in values:
+            continue
+        comodel = field.comodel_name
+        if not comodel or comodel not in env:
+            continue
+        child_fields = env[comodel]._fields
+        if "debit" not in child_fields or "credit" not in child_fields:
+            continue
+
+        rows = _rows_of(values.get(field_name))
+        if not rows:
+            continue
+        debit = sum(float(r.get("debit") or 0.0) for r in rows)
+        credit = sum(float(r.get("credit") or 0.0) for r in rows)
+        if round(debit, 2) != round(credit, 2):
+            out.append(_finding(
+                field_name,
+                f"The entry does not balance: debits total {debit:.2f} and "
+                f"credits total {credit:.2f}.",
+            ))
+    return out
+
+
+def preflight_document(env, payload: Mapping[str, Any], run_dry_run: bool = True) -> dict[str, Any]:
+    """Check a payload without writing it, and answer in findings.
+
+    Findings rather than an exception, because a refusal the agent can read is
+    one it can fix: a missing field it can ask the customer about, an
+    unbalanced entry it can correct. An exception is just "no".
+    """
+    doctype = str(payload.get("doctype") or "")
+    if not doctype:
+        return {"findings": [_finding("doctype", "No document type was given.")]}
+    if doctype not in env:
+        return {"findings": [_finding(
+            "doctype", f"'{doctype}' is not a document type in this system."
+        )]}
+
+    try:
+        check_write_policy(env, doctype, dict(payload))
+    except AgentWriteError as exc:
+        return {"findings": [_finding("policy", exc.message)]}
+
+    model = env[doctype].sudo()
+    values = {k: v for k, v in payload.items() if k != "doctype"}
+    findings: list[dict[str, str]] = []
+
+    # WHAT ODOO WILL FILL IN BY ITSELF, asked of Odoo rather than guessed.
+    #
+    # `required` on its own is not "the agent must supply this". On
+    # account.move, `date` and `currency_id` are both required AND filled by
+    # Odoo — from a default and from the journal respectively — the moment the
+    # record is created. Treating required as "must be present in the payload"
+    # therefore refused every correct journal entry with two findings the agent
+    # could only satisfy by inventing a posting date and a currency, which is
+    # precisely the fabrication this check exists to prevent.
+    #
+    # `default_get` is Odoo's own answer to "what does a new one of these start
+    # out with", and a computed field is filled during create, so neither is
+    # the agent's to provide.
+    try:
+        supplied_by_odoo = set(model.default_get(list(model._fields)))
+    except Exception:  # noqa: BLE001 — a model that cannot answer just gets no relief
+        supplied_by_odoo = set()
+
+    for name, field in model._fields.items():
+        if not field.required or field.readonly or field.type in ("one2many", "many2many"):
+            continue
+        if name in values or name in supplied_by_odoo or field.compute or field.related:
+            continue
+        findings.append(_finding(
+            name, f"'{field.string or name}' is required and has no value."
+        ))
+
+    findings.extend(_balance_findings(env, model, values))
+
+    if run_dry_run and not findings:
+        findings.extend(_dry_run_findings(env, doctype, values))
+
+    return {"findings": findings}
+
+
+def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict[str, str]]:
+    """What Odoo itself says about this payload, WITHOUT writing anything.
+
+    NOTHING IS INSERTED, AND THAT IS THE WHOLE POINT
+        The obvious implementation — create the record inside a savepoint and
+        roll it back — validates perfectly and quietly damages the customer's
+        books. Odoo hands out document numbers from PostgreSQL sequences, and a
+        PostgreSQL sequence does not roll back. Every check of a sales order or
+        a payment would burn a number, so a customer whose agent proposed ten
+        documents and wrote three would find seven gaps in their numbering. In
+        an audited ledger a numbering gap is not untidiness; it is a question
+        the auditor asks and the accountant cannot answer.
+
+        ``new()`` builds the record in memory instead. Onchanges and field
+        conversion run, the model's own ``@api.constrains`` rules run, and no
+        INSERT is issued — the same position the Frappe app takes, where
+        preflight runs the DocType's real ``validate()`` and never inserts.
+
+    IT FAILS OPEN, DELIBERATELY
+        Only Odoo's user-facing refusals — ``ValidationError`` and
+        ``UserError``, which are what a model raises when it means "a person
+        got this wrong" — become findings. Anything else is a constraint that
+        could not cope with an unsaved record, which is a limit of this check
+        rather than a defect in the payload. Turning one of those into a
+        blocking finding would refuse a document that is perfectly correct, and
+        the agent would keep re-composing a payload that was right the first
+        time. The real write still enforces everything, so nothing unsafe
+        passes because of this.
+    """
+    from odoo.exceptions import UserError, ValidationError
+
+    try:
+        record = env[doctype].sudo().new(_odoo_values(env, doctype, values))
+    except (ValidationError, UserError) as exc:
+        return [_finding("payload", _readable(exc))]
+    except WriteRejectedError as refusal:
+        # A reference naming a record this system does not have, or naming two.
+        # It belongs here and not at the write: it is the agent's to fix, and
+        # this is where the agent is told what is wrong while nothing has been
+        # recorded yet.
+        return [_finding(getattr(refusal, "field_path", "payload"), refusal.message)]
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Could not build a trial %s for preflight: %s", doctype, exc)
+        return []
+
+    try:
+        record._validate_fields(list(values))
+    except (ValidationError, UserError) as exc:
+        return [_finding("payload", _readable(exc))]
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Preflight constraints could not run on %s: %s", doctype, exc)
+    return []
+
+
+# ─── write_batch ─────────────────────────────────────────────────────────────
+
+
+def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
+    """The id of the record a Link field names, found the way a person would.
+
+    THE AGENT SENDS A NAME, AND IT IS RIGHT TO.
+        On the protocol a reference is a ``Link`` whose ``options`` say which
+        type it points at, and its value is the record as the customer would
+        say it: "EG Company", "Miscellaneous Operations", "400016 Office Rent".
+        That is what ERPNext stores natively, and it is what an accountant
+        writes down.
+
+        Odoo stores an integer. Nothing translated between the two, so the
+        journal entry above went to the database with ``company_id`` set to the
+        text "EG Company" and PostgreSQL refused it:
+        `invalid input syntax for type integer`. Every create the agent has ever
+        attempted on Odoo failed on this line, with an error written for a
+        database administrator rather than for the accountant reading it.
+
+    FOUND BY ``name_search``, WHICH IS THE VENDOR'S OWN ANSWER to "which record
+    does this text mean". It is what the Odoo user interface uses, so an account
+    is matched on its code as well as its name, a partner on its reference, and
+    a customer's own custom search on whatever they configured.
+
+    AMBIGUITY IS REFUSED, NOT GUESSED. Two journals called "Bank" are two
+    different sets of books, and quietly taking the first is how an entry lands
+    in the wrong one and is found at year end.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return False
+    if text.isdigit():
+        return int(text)
+
+    target = env[model_name].sudo()
+    matches = pick_link_match(text, target.name_search(name=text, operator="ilike", limit=8))
+
+    if isinstance(matches, int):
+        return matches
+    if not matches:
+        refusal = WriteRejectedError(
+            f'I could not find "{text}" in your {model_name} records, so I have '
+            f'not recorded anything for {field_name}.',
+            code="LINK_NOT_FOUND",
+        )
+        refusal.field_path = field_name
+        raise refusal
+    if len(matches) > 1:
+        names = ", ".join(f'"{label}"' for _id, label in matches[:3])
+        refusal = WriteRejectedError(
+            f'"{text}" matches more than one of your {model_name} records '
+            f'({names}). Tell me which one and I will use it.',
+            code="LINK_AMBIGUOUS",
+        )
+        refusal.field_path = field_name
+        raise refusal
+    return matches[0][0]
+
+
+def _odoo_values(env, doctype: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    """The agent's payload as Odoo's ORM expects to receive it.
+
+    Two translations, and both are Odoo's own conventions rather than anything
+    the protocol should know about:
+
+    * a list of row objects becomes a list of ``(0, 0, values)`` commands --
+      without it Odoo refuses a journal entry whose lines are perfectly well
+      formed;
+    * a reference named the way a person names it becomes the integer id Odoo
+      stores. See ``_link_target``.
+
+    Rows are converted through this same function, so a reference inside a
+    journal line is resolved exactly like one on the document itself.
+    """
+    model = env[doctype]
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        field = model._fields.get(key)
+        if field is None:
+            out[key] = value
+        elif field.type == "one2many":
+            out[key] = [
+                (0, 0, _odoo_values(env, field.comodel_name, row))
+                for row in _rows_of(value)
+            ]
+        elif field.type == "many2many":
+            if isinstance(value, (list, tuple)):
+                out[key] = [(6, 0, [
+                    _link_target(env, field.comodel_name, key, item) for item in value
+                ])]
+            else:
+                out[key] = value
+        elif field.type == "many2one":
+            out[key] = _link_target(env, field.comodel_name, key, value)
+        else:
+            out[key] = value
+    return out
+
+
+def _payload_amount(payload: Mapping[str, Any]) -> float:
+    """What this document is worth, for the policy's per-run ceiling."""
+    for key in ("amount_total", "amount", "total", "grand_total"):
+        if payload.get(key) is not None:
+            try:
+                return abs(float(payload[key]))
+            except (TypeError, ValueError):
+                continue
+    for value in payload.values():
+        rows = _rows_of(value)
+        if rows:
+            return sum(abs(float(r.get("debit") or 0.0)) for r in rows)
+    return 0.0
+
+
+def _record_log(env, *, idempotency_key, action, doctype, payload, session_id="",
+                status="in_flight", record_id=0, docstatus_written=None,
+                error_details="", rejection_reason="", dry_run=False):
+    """Write or update this key's row in the audit log.
+
+    Keyed by idempotency key, so a replay updates the same row rather than
+    appending a second one — which is what lets ``get_write_log`` answer "what
+    happened to this exact attempt" instead of "to something like it".
+    """
+    Log = env["razyyn.agent.write.log"].sudo()
+    values = {
+        "timestamp": odoo_fields.Datetime.now(),
+        "user_id": env.uid,
+        "session_id": session_id or "",
+        "target_model": doctype or "",
+        "target_record_id": record_id or 0,
+        "action_type": action if action in _VALID_ACTIONS else "write",
+        "status": status,
+        "payload": json.dumps(payload, default=str) if isinstance(payload, (dict, list)) else str(payload or ""),
+        "rejection_reason": rejection_reason or "",
+        "idempotency_key": idempotency_key,
+        "error_details": error_details or "",
+        "dry_run": dry_run,
+    }
+    if docstatus_written is not None:
+        values["docstatus_written"] = docstatus_written
+
+    existing = Log.search([("idempotency_key", "=", idempotency_key)], limit=1)
+    if existing:
+        existing.write(values)
+        return existing
+    return Log.create(values)
+
+
+def _result(entry, ordinal, outcome, *, docname="", docstatus=None,
+            amount=None, label="", company="", error_code="",
+            error_message="") -> dict[str, Any]:
+    """One row of the batch's answer, in the shape the client's receipt reads."""
+    return {
+        "ordinal": ordinal,
+        # Echoed straight back. It is what lets the client attribute a refusal
+        # to the right row of a four-hundred-row import; an answer without it
+        # that reorders its results names the wrong document.
+        "source_row_ordinal": entry.get("source_row_ordinal"),
+        "idempotency_key": entry.get("idempotency_key") or "",
+        "outcome": outcome,
+        "doctype": entry.get("doctype") or "",
+        "docname": docname or (entry.get("docname") or ""),
+        "docstatus": docstatus,
+        "amount": amount,
+        # WHAT THE CUSTOMER WOULD CALL IT, AND WHERE IT IS. The receipt the
+        # accountant reads is built from this row and from nothing else; a row
+        # carrying only an internal id gives them nothing to look for.
+        "label": label,
+        "company": company,
+        "error_code": error_code,
+        "error_message": error_message,
+    }
+
+
+_REFERENCE_PREFIX = "@"
+
+
+def _references(payload: Mapping[str, Any], docname: Any) -> set[int]:
+    """Indexes of earlier documents in this batch that this one names."""
+    found: set[int] = set()
+
+    def scan(value: Any) -> None:
+        if isinstance(value, str) and value.startswith(_REFERENCE_PREFIX) and value[1:].isdigit():
+            found.add(int(value[1:]))
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                scan(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                scan(item)
+
+    scan(dict(payload))
+    scan(docname)
+    return found
+
+
+def _resolve_references(payload: Mapping[str, Any], produced: Mapping[int, str]) -> dict[str, Any]:
+    """Replace every ``@N`` with the record item N actually produced."""
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith(_REFERENCE_PREFIX) and value[1:].isdigit():
+            target = produced.get(int(value[1:]))
+            if target is None:
+                raise WriteRejectedError(
+                    f"This document refers to {value}, which was never recorded.",
+                    code="DEPENDENCY_MISSING",
+                )
+            return int(target) if str(target).isdigit() else target
+        if isinstance(value, Mapping):
+            return {k: resolve(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [resolve(v) for v in value]
+        return value
+
+    return {k: resolve(v) for k, v in dict(payload).items()}
+
+
+def _addressed(env, doctype: str, docname: Any):
+    """ONE record, by this system's id or by the reference a person quotes.
+
+    AN ID IS NOT THE ONLY ADDRESS A RECORD HAS. This system keys records by a
+    number, and nobody outside it says "62" — they say "INV/2026/0001", which
+    is what is printed on the document and what their accountant types. A
+    look-up that understood only the number answered "there is no such
+    document" to every reference a person could actually give, and the agent
+    repeated it to them.
+
+    ADDRESSED, NOT SEARCHED, and the difference is the `=`: an exact reference
+    matching exactly one record. Two matches is not an address, so nothing is
+    returned rather than one of them being picked — this answer decides which
+    of somebody's documents gets posted or reversed.
+    """
+    model = env[doctype].sudo()
+    text = str(docname or "").strip()
+    if not text:
+        return model.browse()
+    if text.isdigit():
+        record = model.browse(int(text))
+        return record if record.exists() else model.browse()
+
+    found = model.browse()
+    if "name" in model._fields:
+        found = model.search([("name", "=", text)], limit=2)
+    if not found:
+        try:
+            pairs = model.name_search(name=text, operator="=", limit=2)
+        except Exception as exc:  # noqa: BLE001 — a look-up is not a failure
+            logger.info("Could not address %s %r: %s", doctype, text, exc)
+            pairs = []
+        found = model.browse([rid for rid, _label in pairs])
+    return found if len(found) == 1 else model.browse()
+
+
+def _existing(model, entry, doctype):
+    """The record an action names, or a refusal saying which one was missing."""
+    raw = entry.get("docname")
+    record = _addressed(model.env, doctype, raw)
+    if not record:
+        raise ResourceNotFoundError(
+            f"{doctype} {raw!r} is not one record in this system.")
+    return record
+
+
+def _invoke(record, actions, what: str) -> None:
+    """Call whichever of *actions* this model actually has.
+
+    A model with none of them cannot be posted or cancelled, and saying so is
+    the honest answer. The alternative — which this replaced — was to try each
+    in turn, find none, and return success for a document still sitting in
+    draft. The agent would then tell the customer their entry was posted.
+    """
+    for name in actions:
+        if hasattr(record, name):
+            getattr(record, name)()
+            return
+    raise WriteRejectedError(
+        f"{record._name} has no {what} step in this system, so it cannot be {what}ed.",
+        code="NOT_SUBMITTABLE",
+    )
+
+
+def _apply(env, action, doctype, payload, entry, key, session_id, policy):
+    """Do one document's worth of work, inside its own savepoint."""
+    if action not in _VALID_ACTIONS:
+        raise WriteRejectedError(
+            f"'{action}' is not something I can do to a document.", code="INVALID_ACTION"
+        )
+    if not doctype or doctype not in env:
+        raise ResourceNotFoundError(f"'{doctype}' is not a document type in this system.")
+
+    check_write_policy(
+        env, doctype, payload if action in ("create", "update", "amend") else None
+    )
+
+    if policy.dry_run_only:
+        # `rejected`, NOT `success`. The row is the only record of this
+        # idempotency key, and `get_write_log` decides whether a document
+        # exists by reading `status` alone — it reports COMMITTED for
+        # `success` and nothing else. A dry run logged as success therefore
+        # tells the agent's timeout-recovery path that a document was written
+        # when none was, and the customer is told an entry is in their ledger
+        # that is not there. `dry_run=True` beside it is for a person reading
+        # the log; it is not what the recovery path looks at.
+        _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                    payload=payload, session_id=session_id, status="rejected",
+                    rejection_reason="Check-only mode: validated, not recorded.",
+                    dry_run=True)
+        raise WriteRejectedError(
+            "This system is in check-only mode, so nothing was recorded.",
+            code="DRY_RUN_ONLY",
+        )
+
+    _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                payload=payload, session_id=session_id, status="in_flight")
+
+    model = env[doctype].sudo()
+
+    # One savepoint per document: all-or-nothing WITHIN a document, while a
+    # failure leaves the documents already written in this batch untouched.
+    with env.cr.savepoint():
+        if action == "create":
+            record = model.create(_odoo_values(env, doctype, payload))
+        else:
+            record = _existing(model, entry, doctype)
+            if action == "update":
+                _change_a_draft(env, record, doctype, payload)
+            elif action == "amend":
+                if payload:
+                    record.write(_odoo_values(env, doctype, payload))
+            elif action == "submit":
+                _invoke(record, _POST_ACTIONS, "post")
+            elif action == "cancel":
+                _invoke(record, _CANCEL_ACTIONS, "cancel")
+
+    docstatus = _docstatus(record)
+    _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                payload=payload, session_id=session_id, status="success",
+                record_id=record.id, docstatus_written=docstatus)
+    # THE NAME AND THE PLACE, NOT ONLY THE ID. On Odoo a record's reference is
+    # its database id, and a draft journal entry has no number of its own at
+    # all — its `name` is literally "/" until it is posted. So a receipt built
+    # from the id alone tells a customer "account.move 126 was recorded", and
+    # they open Journal Entries and cannot see anything called that. Worse,
+    # documents land in whichever company their accounts belong to, which need
+    # not be the one their screen is showing: a customer looking at the wrong
+    # company sees an empty list and concludes nothing was written. Both are
+    # answered here, from the record itself, at the moment it was written.
+    return (str(record.id), docstatus, _payload_amount(payload),
+            record.display_name or "", _company_of(record))
+
+
+def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any]) -> None:
+    """Change a DRAFT record's own values.
+
+    THE DRAFT CHECK IS TAKEN HERE, INSIDE THE SAVEPOINT, and it is the whole
+    safety of this action. A posted document is part of the customer's ledger:
+    editing one rewrites a recorded figure with no reversal and no trail. The
+    agent checks before it proposes the change and a person approves it — and
+    then time passes, in which somebody may well have posted it. So the last
+    word is taken at the moment of writing rather than trusted from the request.
+
+    Written through ``write`` as the agent user's own rights allow, so this
+    system's access rules and record rules apply exactly as they do to a
+    creation.
+    """
+    if _docstatus(record) != _DRAFT:
+        raise WriteRejectedError(
+            f"{doctype} {record.id} is not a draft, so its contents cannot be "
+            f"changed. A posted document is corrected by reversing it and "
+            f"recording a corrected one in its place.",
+            code="NOT_A_DRAFT",
+        )
+    if not payload:
+        raise WriteRejectedError(
+            f"There is nothing to change on {doctype} {record.id}.",
+            code="NOTHING_TO_CHANGE",
+        )
+    record.write(_odoo_values(env, doctype, payload))
+
+
+def _assert_run_caps(policy, documents: Sequence[Mapping[str, Any]]) -> None:
+    """The customer's per-run ceilings, checked before anything is written.
+
+    ONE check for the whole request. Per document it would let a request that
+    breaches the ceiling write everything up to the document that crosses it —
+    a half-applied import nobody asked for.
+    """
+    if policy.max_documents_per_run and len(documents) > policy.max_documents_per_run:
+        raise WriteRejectedError(
+            f"This would record {len(documents)} documents, and this system "
+            f"allows at most {policy.max_documents_per_run} in one go.",
+            code="RUN_CAP_DOCUMENTS",
+        )
+    if policy.max_total_amount_per_run:
+        total = sum(_payload_amount(d.get("payload") or {}) for d in documents)
+        if total > policy.max_total_amount_per_run:
+            raise WriteRejectedError(
+                f"This would record {total:,.2f} in one go, and this system "
+                f"allows at most {policy.max_total_amount_per_run:,.2f}.",
+                code="RUN_CAP_AMOUNT",
+            )
+
+
+def write_documents_batch(
+    env,
+    documents: Sequence[Mapping[str, Any]],
+    run_id: str = "",
+    session_id: str = "",
+    approved_by: str = "",
+) -> dict[str, Any]:
+    """Every action of one request, in the order given.
+
+    ATOMICITY, AND THE TWO HALVES ARE DIFFERENT QUESTIONS ON PURPOSE
+        WITHIN a document — all or nothing, always. A half-written entry is a
+        corrupt ledger, so each document runs in its own savepoint and a
+        failure rolls that document back and nothing else.
+
+        ACROSS documents — carry on, EXCEPT for documents that depended on one
+        that failed. An import of four hundred invoices must not be discarded
+        over row 397; an invoice for a customer that was never created must not
+        be attempted at all, because Odoo's refusal would name a missing field
+        rather than the real reason.
+
+    BACK-REFERENCES ARE RESOLVED HERE. A field value of ``"@0"`` means "the
+    record item 0 produced", and this loop is the only place that knows that id
+    before the next item runs.
+    """
+    if not documents:
+        raise MissingParameterError("No documents supplied.")
+    if len(documents) > MAX_BATCH_SIZE:
+        raise MissingParameterError(
+            f"At most {MAX_BATCH_SIZE} documents may be written in one request."
+        )
+
+    policy = env["razyyn.agent.write.policy"].sudo().get_policy_singleton()
+    if not policy.enabled:
+        raise WriteRejectedError(
+            "Agent writes are switched off in this system's Agent Write Policy.",
+            code="POLICY_DISABLED",
+        )
+    _assert_run_caps(policy, documents)
+
+    results: list[dict[str, Any]] = []
+    produced: dict[int, str] = {}
+    failed: set[int] = set()
+
+    for ordinal, entry in enumerate(documents, start=1):
+        index = ordinal - 1
+        action = str(entry.get("action") or "create").lower()
+        key = entry.get("idempotency_key") or ""
+        doctype = entry.get("doctype") or ""
+        payload = dict(entry.get("payload") or {})
+        payload.pop("doctype", None)
+
+        if not key:
+            results.append(_result(entry, ordinal, "REJECTED",
+                                   error_code="NO_IDEMPOTENCY_KEY",
+                                   error_message="This document carried no idempotency key."))
+            failed.add(index)
+            continue
+
+        if _references(payload, entry.get("docname")) & failed:
+            results.append(_result(entry, ordinal, "SKIPPED",
+                                   error_code="DEPENDENCY_FAILED",
+                                   error_message="A document this one refers to was not written."))
+            failed.add(index)
+            continue
+
+        replayed = get_write_log(env, key)
+        if replayed.get("found") and replayed.get("status") == "COMMITTED":
+            produced[index] = replayed.get("target_docname") or ""
+            # A REPLAY IS STILL A DOCUMENT THE CUSTOMER HAS TO FIND. Read it
+            # back so the receipt for "you already asked me to do this" names
+            # the document and its company exactly as the first one did.
+            existing = {}
+            if replayed.get("target_docname"):
+                existing = read_document_state(
+                    env, doctype, str(replayed["target_docname"]),
+                ) or {}
+            results.append(_result(
+                entry, ordinal, "REPLAYED",
+                docname=replayed.get("target_docname") or "",
+                docstatus=replayed.get("docstatus_written"),
+                label=existing.get("label") or "",
+                company=existing.get("company") or "",
+            ))
+            continue
+
+        try:
+            resolved = _resolve_references(payload, produced)
+            # THE BACK-REFERENCE APPLIES TO THE DOCUMENT NAMED, NOT ONLY TO THE
+            # VALUES INSIDE IT.
+            #
+            # "Record this entry and post it" is two items in one batch: a
+            # create, and a submit whose `docname` is `@0` -- the document the
+            # first item produced, whose id nothing can know until it has run.
+            # Only the payload was being resolved, so the submit arrived asking
+            # to post a document called "@0" and was refused with
+            # "'@0' is not a record id". The entry was created and left sitting
+            # in draft, while the customer had asked for it to be posted.
+            entry = dict(entry)
+            entry["docname"] = _resolve_references(
+                {"docname": entry.get("docname")}, produced
+            )["docname"]
+            docname, docstatus, amount, label, company = _apply(
+                env, action, doctype, resolved, entry, key, session_id, policy,
+            )
+        except AgentWriteError as exc:
+            _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                        payload=payload, session_id=session_id,
+                        status="rejected", rejection_reason=exc.message)
+            results.append(_result(entry, ordinal, "REJECTED",
+                                   error_code=exc.code, error_message=exc.message))
+            failed.add(index)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Agent %s failed on %s: %s", action, doctype, exc)
+            _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                        payload=payload, session_id=session_id,
+                        status="failed", error_details=str(exc))
+            results.append(_result(entry, ordinal, "REJECTED",
+                                   error_code="WRITE_REJECTED",
+                                   error_message=_readable(exc)))
+            failed.add(index)
+            continue
+
+        produced[index] = docname
+        results.append(_result(
+            entry, ordinal,
+            "CREATED" if action == "create" else "UPDATED",
+            docname=docname, docstatus=docstatus, amount=amount,
+            label=label, company=company,
+        ))
+
+    return {"results": results}

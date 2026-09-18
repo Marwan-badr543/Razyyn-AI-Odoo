@@ -1,0 +1,396 @@
+/* Copyright (c) 2026, Marwan Badr and contributors
+ * For license information, please see LICENSE
+ *
+ * The widgets razyyn_platform.js draws: toasts, the working veil, and the one
+ * modal behind Dialog / confirm / prompt. Everything else the chat window
+ * shows is styled by agent_chat.css, which is copied out of the Frappe app and
+ * must not be edited here.
+ *
+ * These read the chat's own design tokens (--color-accent, --bg-panel, ...),
+ * declared at the top of agent_chat.css, so a modal in the Odoo build is the
+ * same modal a customer sees on ERPNext -- including in dark mode, which the
+ * chat toggles by setting data-theme on <html>.
+ */
+
+/* ── Toasts ─────────────────────────────────────────────────────────────── */
+.razyyn-alert-host {
+	position: fixed;
+	top: 18px;
+	right: 18px;
+	z-index: 2147483000;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	pointer-events: none;
+}
+
+[dir="rtl"] .razyyn-alert-host {
+	right: auto;
+	left: 18px;
+}
+
+.razyyn-alert {
+	pointer-events: auto;
+	min-width: 220px;
+	max-width: 380px;
+	padding: 11px 15px;
+	border-radius: 10px;
+	border: 1px solid var(--border-color, #e5e3f0);
+	border-left: 3px solid var(--color-info, #2563eb);
+	background: var(--bg-panel, #fff);
+	color: var(--text-primary, #16152b);
+	font-family: var(--chat-font, system-ui, sans-serif);
+	font-size: var(--font-size-sm, 13.5px);
+	line-height: 1.45;
+	box-shadow: 0 8px 24px rgba(16, 15, 43, 0.14);
+	animation: razyyn-alert-in 0.18s ease-out;
+}
+
+[dir="rtl"] .razyyn-alert {
+	border-left: 1px solid var(--border-color, #e5e3f0);
+	border-right: 3px solid var(--color-info, #2563eb);
+}
+
+.razyyn-alert-green { border-left-color: var(--color-success, #10b981); }
+.razyyn-alert-red { border-left-color: var(--color-danger, #ef4444); }
+.razyyn-alert-orange { border-left-color: var(--color-warning, #f59e0b); }
+.razyyn-alert-blue { border-left-color: var(--color-info, #2563eb); }
+
+[dir="rtl"] .razyyn-alert-green { border-right-color: var(--color-success, #10b981); }
+[dir="rtl"] .razyyn-alert-red { border-right-color: var(--color-danger, #ef4444); }
+[dir="rtl"] .razyyn-alert-orange { border-right-color: var(--color-warning, #f59e0b); }
+[dir="rtl"] .razyyn-alert-blue { border-right-color: var(--color-info, #2563eb); }
+
+.razyyn-alert-leaving {
+	opacity: 0;
+	transform: translateY(-6px);
+	transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+@keyframes razyyn-alert-in {
+	from { opacity: 0; transform: translateY(-8px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── The working veil ───────────────────────────────────────────────────── */
+.razyyn-freeze {
+	position: fixed;
+	inset: 0;
+	z-index: 2147482000;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	background: rgba(20, 18, 43, 0.38);
+	backdrop-filter: blur(1.5px);
+}
+
+.razyyn-freeze-on { display: flex; }
+
+.razyyn-freeze-message {
+	padding: 13px 22px;
+	border-radius: 10px;
+	background: var(--bg-panel, #fff);
+	color: var(--text-primary, #16152b);
+	font-family: var(--chat-font, system-ui, sans-serif);
+	font-size: var(--font-size-sm, 13.5px);
+	box-shadow: 0 10px 30px rgba(16, 15, 43, 0.25);
+}
+
+/* ── Modal ──────────────────────────────────────────────────────────────── */
+.razyyn-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 2147482500;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding: 8vh 16px 16px;
+	overflow-y: auto;
+	background: rgba(20, 18, 43, 0.42);
+}
+
+.razyyn-modal {
+	width: 100%;
+	max-width: 480px;
+	border-radius: 14px;
+	background: var(--bg-panel, #fff);
+	color: var(--text-primary, #16152b);
+	font-family: var(--chat-font, system-ui, sans-serif);
+	box-shadow: 0 18px 50px rgba(16, 15, 43, 0.3);
+	animation: razyyn-modal-in 0.16s ease-out;
+}
+
+@keyframes razyyn-modal-in {
+	from { opacity: 0; transform: translateY(-10px) scale(0.99); }
+	to { opacity: 1; transform: none; }
+}
+
+.razyyn-modal-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 16px 18px;
+	border-bottom: 1px solid var(--border-color, #e5e3f0);
+}
+
+.razyyn-modal-title {
+	font-size: var(--font-size-md, 15px);
+	font-weight: 600;
+}
+
+.razyyn-modal-close {
+	border: 0;
+	background: none;
+	cursor: pointer;
+	font-size: 22px;
+	line-height: 1;
+	padding: 0 4px;
+	color: var(--text-muted, #66647f);
+}
+
+.razyyn-modal-close:hover { color: var(--text-primary, #16152b); }
+
+.razyyn-modal-body { padding: 18px; }
+.razyyn-modal-message { font-size: var(--font-size-sm, 13.5px); line-height: 1.6;
+	white-space: pre-wrap; word-break: break-word; }
+/* A refusal reads as one. The bar carries the meaning for anyone who cannot
+   pick the colour out, because the text beside it is the server's own words
+   and this shim does not get to rewrite them. */
+.razyyn-modal-red { border-left: 3px solid var(--red-500, #e24c4c); padding-left: 10px; }
+.razyyn-modal-orange { border-left: 3px solid var(--orange-500, #e8a33d); padding-left: 10px; }
+.razyyn-modal-green { border-left: 3px solid var(--green-500, #38a169); padding-left: 10px; }
+.razyyn-modal-blue { border-left: 3px solid var(--blue-500, #2490ef); padding-left: 10px; }
+
+.razyyn-modal-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+
+.razyyn-modal-field label {
+	font-size: var(--font-size-xs, 12px);
+	font-weight: 600;
+	color: var(--text-muted, #66647f);
+}
+
+.razyyn-modal-input {
+	width: 100%;
+	padding: 9px 11px;
+	border-radius: 8px;
+	border: 1px solid var(--border-color, #e5e3f0);
+	background: var(--bg-raised, #f1f0f9);
+	color: var(--text-primary, #16152b);
+	font-family: inherit;
+	font-size: var(--font-size-sm, 13.5px);
+}
+
+.razyyn-modal-input:focus {
+	outline: none;
+	border-color: var(--color-accent, #5b45e0);
+	box-shadow: 0 0 0 3px var(--color-accent-light, rgba(91, 69, 224, 0.1));
+}
+
+.razyyn-modal-foot {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 0 18px 18px;
+}
+
+.razyyn-btn,
+.razyyn-modal .btn {
+	padding: 8px 16px;
+	border-radius: 8px;
+	border: 1px solid var(--border-color, #e5e3f0);
+	background: var(--bg-raised, #f1f0f9);
+	color: var(--text-primary, #16152b);
+	font-family: inherit;
+	font-size: var(--font-size-sm, 13.5px);
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.razyyn-btn:hover { background: var(--bg-zebra, #eceaf6); }
+
+.razyyn-btn-primary {
+	background: var(--color-accent, #5b45e0);
+	border-color: var(--color-accent, #5b45e0);
+	color: var(--text-on-accent, #fff);
+}
+
+.razyyn-btn-primary:hover { background: var(--color-accent-hover, #4c37c9); }
+
+/* The settings dialog's body is Bootstrap-flavoured markup written for the
+ * Frappe desk. Odoo's own Bootstrap is not loaded on this page (deliberately:
+ * it would restyle the whole chat), so the few classes that markup uses are
+ * given the chat's own look here. */
+.razyyn-modal-html .btn {
+	display: flex;
+	width: 100%;
+	margin-bottom: 8px;
+	text-align: left;
+}
+
+[dir="rtl"] .razyyn-modal-html .btn { text-align: right; }
+
+.razyyn-modal-html .btn-danger {
+	background: var(--color-danger-light, rgba(239, 68, 68, 0.08));
+	border-color: var(--color-danger, #ef4444);
+	color: var(--color-danger, #ef4444);
+}
+
+.razyyn-modal-html .text-muted { color: var(--text-muted, #66647f); }
+
+/* ── The page frame the chat expects to be dropped into ─────────────────── */
+html, body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body.razyyn-chat-body {
+	background: var(--bg-page, #f7f7fb);
+	overflow: hidden;
+}
+
+.razyyn-chat-host,
+.razyyn-chat-host .page-container,
+.razyyn-chat-host .page-content {
+	height: 100%;
+	min-height: 0;
+}
+
+/* The chat draws its own header and hides Frappe's with .hide; Frappe's
+ * stylesheet is not here to define what that class means. */
+.hide { display: none !important; }
+
+/* ── The Bootstrap the chat markup expects underneath it ─────────────────────
+ *
+ * The chat window is written for the Frappe desk, which loads Bootstrap. Its
+ * own stylesheet therefore styles `.agent-auth-card .nav-link` and leaves the
+ * base -- a tab strip being a flex row of unbulleted list items -- to
+ * Bootstrap. Without that base the sign-in card comes out as a bulleted list
+ * with the two tabs sitting on top of each other.
+ *
+ * WHAT IS HERE IS ONLY WHAT THE MARKUP USES: nav, btn, form-group,
+ * form-control, and five utilities. Loading the whole of Bootstrap instead
+ * would restyle every element on the page, which is precisely what the chat's
+ * own stylesheet has spent two and a half thousand lines deciding.
+ *
+ * If a class is added to the chat's markup upstream and looks wrong here, this
+ * is the list to add it to.
+ */
+
+.razyyn-chat-host *,
+.razyyn-chat-host *::before,
+.razyyn-chat-host *::after {
+	box-sizing: border-box;
+}
+
+.razyyn-chat-host .nav {
+	display: flex;
+	flex-wrap: wrap;
+	padding-left: 0;
+	margin-bottom: 0;
+	list-style: none;
+}
+
+.razyyn-chat-host .nav-item {
+	list-style: none;
+}
+
+.razyyn-chat-host .nav-link {
+	display: block;
+	padding: 8px 16px;
+	text-decoration: none;
+	background: none;
+	border: 0;
+	cursor: pointer;
+}
+
+.razyyn-chat-host .btn {
+	display: inline-block;
+	padding: 8px 14px;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: var(--bg-raised, #f1f0f9);
+	color: var(--text-primary, #16152b);
+	font-family: inherit;
+	font-size: var(--font-size-sm, 13.5px);
+	font-weight: 500;
+	line-height: 1.5;
+	text-align: center;
+	vertical-align: middle;
+	cursor: pointer;
+	user-select: none;
+}
+
+.razyyn-chat-host .btn:disabled,
+.razyyn-chat-host .btn.disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.razyyn-chat-host .btn-xs {
+	padding: 3px 8px;
+	font-size: var(--font-size-xs, 12px);
+	border-radius: 6px;
+}
+
+.razyyn-chat-host .btn-block {
+	display: block;
+	width: 100%;
+}
+
+.razyyn-chat-host .btn-default,
+.razyyn-chat-host .btn-secondary {
+	border-color: var(--border-color, #e5e3f0);
+}
+
+.razyyn-chat-host .btn-primary {
+	background: var(--color-accent, #5b45e0);
+	border-color: var(--color-accent, #5b45e0);
+	color: var(--text-on-accent, #fff);
+}
+
+.razyyn-chat-host .btn-danger {
+	background: var(--color-danger, #ef4444);
+	border-color: var(--color-danger, #ef4444);
+	color: #fff;
+}
+
+.razyyn-chat-host .form-group {
+	margin-bottom: 16px;
+}
+
+.razyyn-chat-host .form-control {
+	display: block;
+	width: 100%;
+	padding: 10px 12px;
+	border: 1px solid var(--border-color, #e5e3f0);
+	border-radius: 8px;
+	background: var(--bg-raised, #f1f0f9);
+	color: var(--text-primary, #16152b);
+	font-family: inherit;
+	font-size: var(--font-size-sm, 13.5px);
+	line-height: 1.5;
+}
+
+.razyyn-chat-host .form-control:focus {
+	outline: none;
+	border-color: var(--color-accent, #5b45e0);
+	box-shadow: 0 0 0 3px var(--color-accent-light, rgba(91, 69, 224, 0.1));
+}
+
+.razyyn-chat-host .text-muted { color: var(--text-muted, #66647f); }
+.razyyn-chat-host .text-center { text-align: center; }
+.razyyn-chat-host .d-flex { display: flex; }
+.razyyn-chat-host .justify-content-center { justify-content: center; }
+.razyyn-chat-host .sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}

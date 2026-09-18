@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- GENERATED from the Odoo 17 module by tools/sync_to_odoo18.py.
+     Edit razyyn-odoo-17/razyyn_ai/agent_messaging_views.xml and re-run that script;
+     changes made here are overwritten. -->
+<odoo>
+    <!--
+        THE FORM IS WHERE A BOT CHANNEL IS ACTUALLY SET UP, so it says out loud
+        what surprises people: a bot cannot start a conversation. Every place
+        the agent may send to has to be listed here by name, because the name
+        is the only part the agent is ever told.
+    -->
+    <record id="view_razyyn_agent_messaging_settings_form" model="ir.ui.view">
+        <field name="name">razyyn.agent.messaging.settings.form</field>
+        <field name="model">razyyn.agent.messaging.settings</field>
+        <field name="arch" type="xml">
+            <!-- create="0" delete="0": there is one of these records and the
+                 model refuses a second, so a New button here would only ever
+                 produce an error message. -->
+            <form string="Messaging Channels" create="0" delete="0">
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" placeholder="Configuration name"/></h1>
+                    </div>
+                    <notebook>
+                        <page string="Email">
+                            <group>
+                                <field name="email_enabled"/>
+                                <field name="email_from" placeholder="reports@yourcompany.com"/>
+                                <field name="email_sender_name" placeholder="Your Company Accounts"/>
+                            </group>
+                            <div class="text-muted">
+                                Email can reach any address. The agent shows every
+                                message to you in full — the recipient, the words and
+                                each file it would attach — and sends it only once you
+                                approve it.
+                            </div>
+                            <group string="Your own mailbox" groups="base.group_system">
+                                <field name="smtp_host" placeholder="smtp.gmail.com"/>
+                                <field name="smtp_port" placeholder="587"/>
+                                <field name="smtp_security"/>
+                                <field name="smtp_username"
+                                       placeholder="leave empty to use the address above"/>
+                                <field name="smtp_password" password="True"/>
+                            </group>
+                            <div class="text-muted" groups="base.group_system">
+                                Fill these in and email is sent straight from that
+                                mailbox, so any address works — a free Gmail account,
+                                Outlook, or your own mail server.
+                                <b>Gmail will not accept your normal password:</b> turn
+                                on 2-Step Verification, create a 16-character App
+                                Password at
+                                <code>myaccount.google.com/apppasswords</code>, and
+                                paste it above.
+                                Leave them empty and email goes through this system's
+                                own outgoing mail server instead.
+                            </div>
+                            <group>
+                                <field name="email_last_error" invisible="not email_last_error"/>
+                            </group>
+                            <separator string="Saved recipients" invisible="not email_enabled"/>
+                            <div class="text-muted mb-2" invisible="not email_enabled">
+                                Email reaches any address, so this list is an address
+                                book rather than a fence. Save the people you send to
+                                often and the agent knows them by name: "email the trial
+                                balance to Marwan" needs no address typed. Giving a full
+                                address instead still works, and always will.
+                            </div>
+                            <field name="email_destination_ids" invisible="not email_enabled"
+                                   context="{'default_channel': 'gmail'}">
+                                <list editable="bottom">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="channel" column_invisible="True"/>
+                                    <field name="label" string="Name"/>
+                                    <field name="address" string="Email Address"/>
+                                    <field name="is_default"/>
+                                    <field name="notes" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Telegram">
+                            <group>
+                                <field name="telegram_enabled"/>
+                                <field name="telegram_bot_token" password="True"
+                                       groups="base.group_system"/>
+                            </group>
+                            <group>
+                                <field name="telegram_last_error" invisible="not telegram_last_error"/>
+                            </group>
+                            <separator string="Where the agent may send" invisible="not telegram_enabled"/>
+                            <div class="text-muted mb-2" invisible="not telegram_enabled">
+                                A Telegram bot can only send where it has already been
+                                added — there is no way to send to a phone number. List
+                                each chat here and give it the name you would use out
+                                loud ("Finance team"); that name is what the agent is
+                                offered, and it will refuse to send anywhere that is not
+                                on this list.
+                            </div>
+                            <field name="telegram_destination_ids" invisible="not telegram_enabled"
+                                   context="{'default_channel': 'telegram'}">
+                                <list editable="bottom">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="channel" column_invisible="True"/>
+                                    <field name="label" string="Name"/>
+                                    <field name="address" string="Chat ID"/>
+                                    <field name="is_default"/>
+                                    <field name="notes" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Slack">
+                            <group>
+                                <field name="slack_enabled"/>
+                                <field name="slack_bot_token" password="True"
+                                       groups="base.group_system"/>
+                            </group>
+                            <group>
+                                <field name="slack_last_error" invisible="not slack_last_error"/>
+                            </group>
+                            <separator string="Where the agent may send" invisible="not slack_enabled"/>
+                            <div class="text-muted mb-2" invisible="not slack_enabled">
+                                A Slack bot can only post into a channel it has been
+                                invited to. List each channel here under the name you
+                                would use out loud; that name is what the agent is
+                                offered, and it will refuse to post anywhere that is not
+                                on this list.
+                            </div>
+                            <field name="slack_destination_ids" invisible="not slack_enabled"
+                                   context="{'default_channel': 'slack'}">
+                                <list editable="bottom">
+                                    <field name="sequence" widget="handle"/>
+                                    <field name="channel" column_invisible="True"/>
+                                    <field name="label" string="Name"/>
+                                    <field name="address" string="Channel ID"/>
+                                    <field name="is_default"/>
+                                    <field name="notes" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!--
+        THE MENU OPENS THE RECORD, NOT A LIST OF ONE.
+        A list here would carry a New button, and the only thing a second
+        configuration record can do is be filled in carefully and then ignored
+        — every reader of this model takes the first record there is. The
+        server action asks the model for that record, making it on first use,
+        and lands the administrator straight on it.
+    -->
+    <record id="action_razyyn_agent_messaging_settings" model="ir.actions.server">
+        <field name="name">Messaging Channels</field>
+        <field name="model_id" ref="model_razyyn_agent_messaging_settings"/>
+        <field name="state">code</field>
+        <field name="code">action = model.action_open_settings()</field>
+    </record>
+
+    <!--
+        THE LOG IS READ-ONLY ON PURPOSE. It is the evidence that a message left
+        this system, and evidence anybody can edit is not evidence.
+    -->
+    <record id="view_razyyn_agent_message_log_form" model="ir.ui.view">
+        <field name="name">razyyn.agent.message.log.form</field>
+        <field name="model">razyyn.agent.message.log</field>
+        <field name="arch" type="xml">
+            <form string="Message Log" create="0" edit="0" delete="0">
+                <sheet>
+                    <group>
+                        <group string="Message">
+                            <field name="channel"/>
+                            <field name="destination_label"/>
+                            <field name="destination"/>
+                            <field name="subject"/>
+                            <field name="attachment_names"/>
+                        </group>
+                        <group string="Outcome">
+                            <field name="status"/>
+                            <field name="sent_at"/>
+                            <field name="provider_message_id"/>
+                            <field name="approved_by"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Message Body">
+                            <field name="body"/>
+                        </page>
+                        <page string="Why it did not go" invisible="status == 'sent'">
+                            <group>
+                                <field name="error_code"/>
+                            </group>
+                            <field name="error_message"/>
+                        </page>
+                        <page string="Traceability">
+                            <group>
+                                <field name="idempotency_key"/>
+                                <field name="session_id"/>
+                                <field name="run_id"/>
+                                <field name="requested_by"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_razyyn_agent_message_log_tree" model="ir.ui.view">
+        <field name="name">razyyn.agent.message.log.tree</field>
+        <field name="model">razyyn.agent.message.log</field>
+        <field name="arch" type="xml">
+            <list string="Message Logs" create="0" delete="0"
+                  decoration-danger="status == 'failed'"
+                  decoration-warning="status == 'refused'"
+                  decoration-success="status == 'sent'">
+                <field name="sent_at"/>
+                <field name="channel"/>
+                <field name="destination_label"/>
+                <field name="destination"/>
+                <field name="subject"/>
+                <field name="status"/>
+                <field name="provider_message_id" optional="show"/>
+                <field name="error_code" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_razyyn_agent_message_log" model="ir.actions.act_window">
+        <field name="name">Message Logs</field>
+        <field name="res_model">razyyn.agent.message.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>
