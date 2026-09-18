@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) 2026, Marwan Badr and contributors
+     For license information, please see LICENSE
+
+     CLICKING "RAZYYN AI" OPENS RAZYYN AI.
+
+     It used to open a URL in a new browser window, which meant the customer
+     landed on a bare page with no Odoo around it: no menu, no breadcrumbs, no
+     way to reach their own settings, their write policy or their audit log
+     without going back and finding the tab they came from. The chat is a
+     client action now, so it opens inside Odoo like every other screen and the
+     rest of the application stays exactly where it was. -->
+<odoo>
+
+    <menuitem id="menu_razyyn_root"
+              name="Razyyn AI"
+              sequence="10"
+              web_icon="razyyn_ai,static/description/icon.png"/>
+
+    <!-- First, so opening the app opens the chat. -->
+    <menuitem id="menu_razyyn_chat"
+              name="Agent Chat"
+              parent="menu_razyyn_root"
+              action="action_razyyn_chat"
+              sequence="10"/>
+
+    <!-- ── EVERY RECORD THIS MODULE KEEPS, IN ONE LIST ──────────────────── -->
+    <!-- These eight are the whole of razyyn_ai/models. They used to be split
+         across three sections — History, Governance & Security, Configuration
+         — and six of the eight sat under a parent carrying
+         `groups="razyyn_ai.group_razyyn_manager"`. A section whose parent is
+         hidden takes its children with it, so whoever was not in that group
+         saw an app with two screens in it and no sign the other six existed.
+
+         The gating itself is right and is kept, but it belongs on the ITEM,
+         not on a heading: Odoo hides a parent whose children are all
+         invisible, so a plain employee still sees a short list rather than an
+         empty section, and a manager sees one flat list instead of hunting
+         through three headings for the screen they want.
+
+         A new model file must arrive here too. Nothing about Odoo enforces
+         that — a model with no menu simply cannot be opened, silently — so
+         tests/test_menu_covers_every_model.py fails the build if one is
+         added and not listed. -->
+    <menuitem id="menu_razyyn_history"
+              name="Razyyn AI Models"
+              parent="menu_razyyn_root"
+              sequence="20"/>
+
+    <menuitem id="menu_razyyn_chat_sessions"
+              name="Conversations"
+              parent="menu_razyyn_history"
+              action="action_razyyn_chat_session"
+              sequence="10"/>
+
+    <menuitem id="menu_razyyn_chat_messages"
+              name="Messages"
+              parent="menu_razyyn_history"
+              action="action_razyyn_chat_message"
+              sequence="20"/>
+
+    <!-- ── Everything else in this Odoo ─────────────────────────────────── -->
+    <!-- ERPNext has an awesome bar that opens any DocType in the system.
+         Odoo has nothing of the kind: a model is reachable only if some module
+         put a menu in front of it. So the app carries its own index, and the
+         customer can get to any record from inside Razyyn AI. -->
+    <menuitem id="menu_razyyn_browse"
+              name="Browse Odoo"
+              parent="menu_razyyn_root"
+              sequence="25"/>
+
+    <!-- "All ODOO Models", not "All Models", now that the list above is called
+         Razyyn AI Models. Two menu entries a few pixels apart, one holding the
+         eight records this module keeps and the other every model in the
+         database, must not read as the same thing. -->
+    <menuitem id="menu_razyyn_all_models"
+              name="All Odoo Models"
+              parent="menu_razyyn_browse"
+              action="action_razyyn_all_models"
+              sequence="10"/>
+
+    <!-- MANAGERS ONLY, AND THE MENU SAYS SO BY NOT BEING THERE.
+         What the agent is allowed to do to the books, and what it did, are the
+         two records an ordinary employee must not be able to change. The row
+         rules already refuse them — but a menu that is visible and answers
+         "you are not allowed" when clicked reads as a broken product rather
+         than as a boundary.
+
+         The same `groups` that used to sit on the heading, one per item. Same
+         people refused, same records refused to them; the difference is that a
+         manager now finds these in the same list as the rest instead of under
+         a separate heading. -->
+    <menuitem id="menu_razyyn_write_policy"
+              name="Write Policy"
+              parent="menu_razyyn_history"
+              action="action_razyyn_agent_write_policy"
+              groups="razyyn_ai.group_razyyn_manager"
+              sequence="30"/>
+
+    <menuitem id="menu_razyyn_write_log"
+              name="Write Audit Logs"
+              parent="menu_razyyn_history"
+              action="action_razyyn_agent_write_log"
+              groups="razyyn_ai.group_razyyn_manager"
+              sequence="40"/>
+
+    <menuitem id="menu_razyyn_settings"
+              name="Connections"
+              parent="menu_razyyn_history"
+              action="action_razyyn_agent_settings"
+              groups="razyyn_ai.group_razyyn_manager"
+              sequence="50"/>
+
+    <menuitem id="menu_razyyn_messaging_settings"
+              name="Messaging Channels"
+              parent="menu_razyyn_history"
+              action="action_razyyn_agent_messaging_settings"
+              groups="razyyn_ai.group_razyyn_manager"
+              sequence="60"/>
+
+    <!-- There is no separate Destinations screen any more. Every place the
+         agent may send to is kept on the tab of the channel that reaches it,
+         so setting up Telegram means filling in one tab rather than two, and a
+         destination can no longer be typed under the wrong channel. -->
+
+    <menuitem id="menu_razyyn_message_log"
+              name="Message Logs"
+              parent="menu_razyyn_history"
+              action="action_razyyn_agent_message_log"
+              groups="razyyn_ai.group_razyyn_manager"
+              sequence="70"/>
+
+    <!-- Plumbing. Visible to administrators only, because an empty list is the
+         healthy state and anybody else would read it as something missing. -->
+    <menuitem id="menu_razyyn_chat_events"
+              name="Stream Events"
+              parent="menu_razyyn_history"
+              action="action_razyyn_chat_event"
+              groups="base.group_system"
+              sequence="90"/>
+
+</odoo>

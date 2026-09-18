@@ -3,7 +3,7 @@
 
 """Runs standalone — no Odoo installation required.
 
-Lives OUTSIDE ``razyyn_agent_connector/`` on purpose: that package's own
+Lives OUTSIDE ``razyyn_ai/`` on purpose: that package's own
 ``__init__.py`` imports ``models``/``controllers``, which import ``odoo``. A
 test file placed inside the addon tree gets pulled into that import chain the
 moment any test runner resolves its package name — even one that never
@@ -15,7 +15,7 @@ this file has no such ancestor, so ``python -m pytest`` or
 installed at all — which is exactly what CI does before this addon ever
 touches a real Odoo instance.
 
-``razyyn_agent_connector/services/query_guard.py`` itself has zero ``odoo``
+``razyyn_ai/services/query_guard.py`` itself has zero ``odoo``
 imports for the same reason (see its own docstring) — this suite is what
 proves that property, by loading it directly from its file path rather than
 importing the package around it.
@@ -34,7 +34,7 @@ import unittest
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _module_path = os.path.join(
-    _here, "..", "razyyn_agent_connector", "services", "query_guard.py"
+    _here, "..", "razyyn_ai", "services", "query_guard.py"
 )
 _spec = importlib.util.spec_from_file_location("razyyn_query_guard_under_test", _module_path)
 query_guard = importlib.util.module_from_spec(_spec)

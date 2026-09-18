@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <record id="ir_cron_razyyn_cleanup_generated_files" model="ir.cron">
+            <field name="name">Razyyn Agent: clean up expired generated reports</field>
+            <field name="model_id" ref="model_razyyn_agent_chat_session"/>
+            <field name="state">code</field>
+            <!-- ir.cron's `code` runs through Odoo's safe_eval sandbox, which
+                 forbids `import` outright — no exceptions, not even a
+                 relative one. `model` is the one thing the sandbox binds for
+                 us from model_id above, so the entry point has to be a
+                 method on that model; the import (and the actual sweep
+                 logic, shared with the Frappe app's own hourly job) lives in
+                 cron_cleanup_expired_generated_files() instead, an ordinary
+                 method Odoo loads normally, not through this sandbox. -->
+            <field name="code">model.cron_cleanup_expired_generated_files()</field>
+            <field name="interval_number">1</field>
+            <field name="interval_type">hours</field>
+            <field name="numbercall">-1</field>
+            <field name="active">1</field>
+        </record>
+
+        <record id="ir_cron_razyyn_prune_chat_events" model="ir.cron">
+            <field name="name">Razyyn AI: prune delivered chat stream events</field>
+            <field name="model_id" ref="model_razyyn_agent_chat_event"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_prune_delivered_events()</field>
+            <field name="interval_number">1</field>
+            <field name="interval_type">hours</field>
+            <field name="numbercall">-1</field>
+            <field name="active">1</field>
+        </record>
+    </data>
+</odoo>

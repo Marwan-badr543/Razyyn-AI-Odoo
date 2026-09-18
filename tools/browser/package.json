@@ -1,0 +1,6 @@
+{
+  "name": "razyyn-odoo-browser-checks",
+  "private": true,
+  "description": "Drives Razyyn AI inside a real browser, against a real Odoo.",
+  "dependencies": { "ws": "^8.18.0" }
+}

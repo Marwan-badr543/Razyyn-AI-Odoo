@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) 2026, Marwan Badr and contributors
+     For license information, please see LICENSE
+
+     THE PAGE IS A LOADER, AND THAT IS THE WHOLE POINT.
+
+     What used to be here was seven hundred lines of hand-written chat against
+     the Frappe app's eight thousand: no streaming, no saved history, and one
+     desk out of six reachable. It has been replaced by the Frappe app's own
+     chat window, copied into static/src/chat/frappe/ by
+     tools/sync_from_frappe.py and given an Odoo to run on by
+     razyyn_platform.js.
+
+     So this file's only job is to load them in the right order and hand over.
+     Resist adding chat behaviour here: anything written in this file exists on
+     Odoo and not on ERPNext, which is how the two products drifted apart the
+     first time. -->
+<odoo>
+    <template id="chat_page" name="Razyyn AI">
+        <html t-att-lang="lang" t-att-dir="direction">
+            <head>
+                <meta charset="utf-8"/>
+                <meta name="viewport" content="width=device-width, initial-scale=1"/>
+                <title>Razyyn AI</title>
+                <link rel="icon" type="image/png" href="/razyyn_ai/static/description/icon.png"/>
+
+                <!-- Odoo's own copies, on the same paths in 17 and 18. The
+                     chat's markup is written against Font Awesome 4 icon
+                     names, and eight thousand lines of it are jQuery. -->
+                <link rel="stylesheet" href="/web/static/src/libs/fontawesome/css/font-awesome.css"/>
+                <!-- These files are served as standalone static resources, not
+                     through Odoo's fingerprinted asset bundles. Odoo caches a
+                     static URL for seven days, so keeping the same URL after a
+                     module upgrade can leave the browser running an older RPC
+                     adapter: the server completes /auth/login and saves the
+                     tokens, while the old page appears to do nothing. Change
+                     this cache key whenever the standalone chat assets change. -->
+                <link rel="stylesheet" href="/razyyn_ai/static/src/chat/frappe/agent_chat.css?v=1.2.0"/>
+                <link rel="stylesheet" href="/razyyn_ai/static/src/chat/razyyn_platform.css?v=1.2.0"/>
+                <script type="text/javascript" src="/web/static/lib/jquery/jquery.js"></script>
+
+                <!-- What the shim needs to answer frappe.session / frappe.boot
+                     without a round trip. Written by the server, escaped as
+                     JSON, never interpolated into JavaScript by hand. -->
+                <script type="application/json" id="razyyn-boot" t-out="boot_json"/>
+                <script type="text/javascript">
+                    window.RAZYYN_BOOT = JSON.parse(
+                        document.getElementById("razyyn-boot").textContent
+                    );
+                </script>
+
+                <!-- The seventeen calls. Must come before any copied file,
+                     because they assign to window.frappe as they load. -->
+                <script type="text/javascript" src="/razyyn_ai/static/src/chat/razyyn_platform.js?v=1.2.0"></script>
+
+                <!-- The chat window, assembled out of the Frappe app by
+                     tools/sync_from_frappe.py exactly as Frappe's own asset
+                     builder assembles it. One file, because the order its
+                     parts load in is declared upstream and must not be
+                     re-stated (differently, eventually) here. Do not edit it:
+                     run the sync. -->
+                <script type="text/javascript" src="/razyyn_ai/static/src/chat/frappe/agent_chat.js?v=1.2.0"></script>
+            </head>
+            <body class="razyyn-chat-body">
+                <div id="razyyn-chat-host" class="razyyn-chat-host"/>
+                <script type="text/javascript">
+                    (function () {
+                        var host = document.getElementById("razyyn-chat-host");
+                        var page = window.frappe.pages["agent-chat"];
+                        page.on_page_load(host);
+                        // Frappe calls this every time the customer returns to
+                        // the route; here the equivalent moment is the frame
+                        // being shown again after the browser had it hidden.
+                        document.addEventListener("visibilitychange", function () {
+                            if (!document.hidden &amp;&amp; page.on_page_show) {
+                                page.on_page_show(host);
+                            }
+                        });
+                    })();
+                </script>
+            </body>
+        </html>
+    </template>
+</odoo>

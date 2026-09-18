@@ -1,0 +1,23 @@
+/* Copyright (c) 2026, Marwan Badr and contributors
+ * For license information, please see LICENSE
+ *
+ * The chat fills whatever the web client gives it, with no border and no
+ * scrollbar of its own -- the page inside manages its own scrolling, and a
+ * second one around it is the giveaway that something is embedded.
+ */
+
+.razyyn_chat_action {
+	display: flex;
+	flex: 1 1 auto;
+	min-height: 0;
+	height: 100%;
+	overflow: hidden;
+}
+
+.razyyn_chat_frame {
+	flex: 1 1 auto;
+	width: 100%;
+	height: 100%;
+	border: 0;
+	display: block;
+}

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) 2026, Marwan Badr and contributors
+     For license information, please see LICENSE
+
+     EVERY MODEL, REACHABLE FROM THE MENU.
+
+     ERPNext customers type into the awesome bar and land on any DocType list
+     in the system. Odoo has no equivalent: a model is reachable only if some
+     installed module happened to put a menu in front of it, and most have
+     none. So the app carries its own index — and because it is an ordinary
+     list view, Odoo's own search, filters and grouping come with it. -->
+<odoo>
+
+    <record id="view_razyyn_model_browser_tree" model="ir.ui.view">
+        <field name="name">razyyn.model.browser.tree</field>
+        <field name="model">ir.model</field>
+        <field name="arch" type="xml">
+            <tree string="All Models" create="false" delete="false" edit="false">
+                <field name="name"/>
+                <field name="model"/>
+                <field name="modules" string="Provided by"/>
+                <field name="razyyn_browsable" column_invisible="1"/>
+                <button name="action_razyyn_open_records" type="object"
+                        string="Open Records" icon="fa-arrow-circle-right"
+                        class="btn-link"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_razyyn_model_browser_search" model="ir.ui.view">
+        <field name="name">razyyn.model.browser.search</field>
+        <field name="model">ir.model</field>
+        <field name="arch" type="xml">
+            <search string="Find a Model">
+                <!-- Both spellings, because half of what anybody types is the
+                     technical one the agent just said ("account.move") and the
+                     other half is the words on the screen ("Journal Entry"). -->
+                <field name="name" string="Model"
+                       filter_domain="['|', ('name', 'ilike', self), ('model', 'ilike', self)]"/>
+                <field name="model"/>
+                <field name="modules" string="Provided by"/>
+                <separator/>
+                <filter name="accounting" string="Accounting"
+                        domain="[('model', 'like', 'account%')]"/>
+                <filter name="partners" string="Contacts &amp; Companies"
+                        domain="['|', ('model', 'like', 'res.partner%'), ('model', 'like', 'res.company%')]"/>
+                <filter name="products" string="Products"
+                        domain="[('model', 'like', 'product%')]"/>
+                <filter name="razyyn" string="Razyyn AI"
+                        domain="[('model', 'like', 'razyyn%')]"/>
+                <group expand="0" string="Group By">
+                    <filter name="by_module" string="Module" context="{'group_by': 'modules'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_razyyn_all_models" model="ir.actions.act_window">
+        <!-- The same words as the menu entry that opens it. The breadcrumb
+             read "All Models" while the menu said "All Odoo Models", a few
+             pixels under a second list called "Razyyn AI Models". -->
+        <field name="name">All Odoo Models</field>
+        <field name="res_model">ir.model</field>
+        <field name="view_mode">tree</field>
+        <field name="search_view_id" ref="view_razyyn_model_browser_search"/>
+        <!-- Only what can actually be opened. See _compute_razyyn_browsable:
+             wizards, abstract models and anything without a table of its own
+             are dead ends, and a list of dead ends is worse than no list. -->
+        <field name="domain">[('razyyn_browsable', '=', True)]</field>
+        <field name="context">{'search_default_accounting': 0}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Every model on this Odoo
+            </p>
+            <p>
+                Search for one by its name or its technical name, then press
+                <b>Open Records</b>. Whether you may read a model is decided by
+                your Odoo access rights, exactly as it is anywhere else.
+            </p>
+        </field>
+    </record>
+
+    <record id="action_razyyn_all_models_tree" model="ir.actions.act_window.view">
+        <field name="sequence" eval="1"/>
+        <field name="view_mode">tree</field>
+        <field name="view_id" ref="view_razyyn_model_browser_tree"/>
+        <field name="act_window_id" ref="action_razyyn_all_models"/>
+    </record>
+
+</odoo>

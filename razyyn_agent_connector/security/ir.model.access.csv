@@ -1,6 +1,0 @@
-id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_razyyn_agent_settings_system,razyyn.agent.settings.system,model_razyyn_agent_settings,base.group_system,1,1,1,1
-access_razyyn_agent_chat_session_system,razyyn.agent.chat.session.system,model_razyyn_agent_chat_session,base.group_system,1,1,1,1
-access_razyyn_agent_chat_message_system,razyyn.agent.chat.message.system,model_razyyn_agent_chat_message,base.group_system,1,1,1,1
-access_razyyn_chat_login_user,razyyn.chat.login.user,model_razyyn_chat_login,base.group_user,1,1,1,1
-access_razyyn_chat_login_system,razyyn.chat.login.system,model_razyyn_chat_login,base.group_system,1,1,1,1

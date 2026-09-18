@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="razyyn_ai.ChatAction">
+        <div class="razyyn_chat_action o_action">
+            <iframe t-ref="frame"
+                    class="razyyn_chat_frame"
+                    src="/razyyn/chat"
+                    title="Razyyn AI"
+                    allow="clipboard-write"/>
+        </div>
+    </t>
+
+</templates>
