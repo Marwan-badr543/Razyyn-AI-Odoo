@@ -3,7 +3,7 @@
 
 {
     "name": "Razyyn AI",
-    "version": "17.0.1.8.0",
+    "version": "17.0.1.9.0",
     "summary": "The Razyyn AI accounting agent, inside Odoo: chat, reading, "
                "and governed recording of entries.",
     "description": """

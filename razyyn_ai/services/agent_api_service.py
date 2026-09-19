@@ -604,6 +604,54 @@ def _model_suggestions(env, wanted: str) -> str:
     return "This system has: " + "; ".join(named) + "."
 
 
+def _where_a_related_field_lives(env, model_name: str, field_name: str, declared) -> str:
+    """One related field, as the join that reaches it — or "" if it cannot be.
+
+    Only the ONE-HOP case is described, because only that one is a join the
+    agent can write without being told anything else: this table holds a
+    reference, and the value is a column on the table it points at. A two-hop
+    path would need every table between named, and a sentence nobody can act on
+    is worse than saying nothing.
+    """
+    # Odoo holds the path as a dotted STRING ("product_tmpl_id.name"), not a
+    # sequence. Iterating it as one turns a two-hop path into thirty-one
+    # single characters and this said nothing at all about anything.
+    path = str(getattr(declared, "related", "") or "").split(".")
+    if len(path) != 2:
+        return ""
+    link_name, target_field = path
+    link = env[model_name]._fields.get(link_name)
+    if link is None or link.type != "many2one" or not link.comodel_name:
+        return ""
+    if link.comodel_name not in env:
+        return ""
+    target = env[link.comodel_name]
+    here = env[model_name]._table
+    reached_by = f"{here}.{link_name} = {target._table}.id"
+
+    if target_field in _actual_columns(env.cr, target._table):
+        return (f"{field_name}: NOT a column here — it is "
+                f"{target._table}.{target_field}, reached by {reached_by}")
+
+    # THE ONE THAT KEPT BEING SELECTED ANYWAY. A product variant's taxes are
+    # its template's taxes, and its template's taxes are a many-to-many. So the
+    # name is a column on NEITHER table, and a reply that simply omitted it
+    # left an agent to write `pt.taxes_id` over and over.
+    onwards = target._fields.get(target_field)
+    if onwards is not None and onwards.type == "many2many" and onwards.comodel_name:
+        junction = getattr(onwards, "relation", "") or ""
+        rows = env[onwards.comodel_name]._table if onwards.comodel_name in env else ""
+        if junction and rows:
+            return (f"{field_name}: NOT a column anywhere — it is "
+                    f"{target._table}.{target_field}, itself a many-to-many "
+                    f"onto {rows} through {junction} "
+                    f"({junction}.{getattr(onwards, 'column1', '?')} = "
+                    f"{target._table}.id, {junction}."
+                    f"{getattr(onwards, 'column2', '?')} = {rows}.id); "
+                    f"reach the row first by {reached_by}")
+    return ""
+
+
 def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
     """Field summary for one Odoo model, shaped for the agent to write SQL from
     — the Odoo counterpart of the Frappe app's ``build_doctype_schema_summary``.
@@ -641,6 +689,7 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
 
     columns: list[str] = ["id (integer, primary key)"]
     joins: list[str] = []
+    properties: list[str] = []
 
     for field in field_records:
         if field.ttype in _IGNORED_FIELD_TYPES:
@@ -657,9 +706,26 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
                 )
             elif field.ttype == "many2many" and field.relation:
                 target = env[field.relation]._table if field.relation in env else field.relation.replace(".", "_")
-                junction = field.relation_table or "(a junction table)"
+                # ASKED OF THE MODEL WHEN THE DEFINITION ROW IS SILENT. Odoo
+                # fills `relation_table` in on the field object always and on
+                # `ir.model.fields` only sometimes, so "(a junction table)"
+                # reached the agent for fields whose junction has a perfectly
+                # good name — and it then wrote the join against a table it had
+                # invented.
+                declared_m2m = env[model_name]._fields.get(field.name)
+                junction = (field.relation_table
+                            or getattr(declared_m2m, "relation", "")
+                            or "(a junction table)")
+                ends = ""
+                if declared_m2m is not None and junction != "(a junction table)":
+                    here = env[model_name]._table
+                    ends = (f" ({junction}."
+                            f"{getattr(declared_m2m, 'column1', '?')} = {here}.id, "
+                            f"{junction}."
+                            f"{getattr(declared_m2m, 'column2', '?')} = {target}.id)")
                 joins.append(
-                    f"{field.name}: many-to-many onto {target} through {junction}"
+                    f"{field.name}: many-to-many onto {target} through "
+                    f"{junction}{ends}"
                 )
             continue
 
@@ -667,6 +733,40 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
             # Declared by the model but absent from the table: computed,
             # related, or stored somewhere other than a column. Listing it
             # would hand the agent a name no SELECT can return.
+            #
+            # ONE KIND OF ABSENCE IS WORTH EXPLAINING RATHER THAN HIDING. A
+            # company-dependent field — a partner's receivable account, a
+            # product's cost, a category's income account — is a real,
+            # per-company value that simply does not live in this table. Left
+            # out in silence, an agent looking for one reads the list, does not
+            # find it, and tries `property_account_receivable_id` anyway,
+            # then `property_account_position_id`, then
+            # `property_payment_term_id` — each refused, each time told only
+            # what the table DOES have, which is never where the answer is.
+            # Named here, with where it actually lives, the question has an
+            # answer the first time it is asked.
+            # ASKED OF THE MODEL, NOT OF ITS DEFINITION ROW. `ir.model.fields`
+            # has no `company_dependent` column — the flag lives on the ORM
+            # field object — so reading it off the definition silently answered
+            # False for every field there is.
+            declared = env[model_name]._fields.get(field.name)
+            if getattr(declared, "company_dependent", False):
+                properties.append(
+                    f"{field.name} ({field.ttype})"
+                    + (f" - {field.field_description}" if field.field_description else "")
+                )
+                continue
+            # A FIELD THAT IS REALLY A COLUMN ON ANOTHER TABLE. Odoo's
+            # `related` fields are the commonest shape of this: a product
+            # variant's `name` is its template's `name`, and it is not stored
+            # on `product_product` at all. Omitted in silence, the agent reads
+            # the column list, sees no `name`, and selects it anyway — because
+            # every product in the world has a name and its absence reads as an
+            # oversight. Told where the value actually sits, and how to reach
+            # it, the same query is written correctly the first time.
+            elsewhere = _where_a_related_field_lives(env, model_name, field.name, declared)
+            if elsewhere:
+                joins.append(elsewhere)
             continue
 
         if is_denied_column(field.name):
@@ -683,12 +783,27 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
         if field.required:
             info += " [Required]"
         if column_types.get(field.name) == "jsonb":
-            # A translated column. The name alone is not something that can go
-            # in a WHERE clause; the expression is.
-            info += (
-                f" [translated column, stored as JSON per language -- "
-                f"in SQL read it as {_translated_column_sql(env, field.name)}]"
-            )
+            # TWO DIFFERENT REASONS A COLUMN IS JSON HERE, AND THEY ARE READ
+            # DIFFERENTLY. A translated column is keyed by LANGUAGE. A
+            # company-dependent one — which newer Odoo keeps on the table
+            # instead of in a properties table — is keyed by COMPANY ID.
+            #
+            # Described as translated, a partner's credit limit and receivable
+            # account came back with `-> read it as credit_limit->>'en_US'`,
+            # which returns nothing at all: the keys are "1" and "2". The agent
+            # then reads an empty value for a field it was told how to read,
+            # which is worse than being told nothing.
+            if getattr(env[model_name]._fields.get(field.name), "company_dependent", False):
+                info += (
+                    f" [per-company column, stored as JSON keyed by COMPANY ID "
+                    f"-- in SQL read this company's value as "
+                    f"{field.name}->>'<the company id>', never ->>'en_US']"
+                )
+            else:
+                info += (
+                    f" [translated column, stored as JSON per language -- "
+                    f"in SQL read it as {_translated_column_sql(env, field.name)}]"
+                )
         if field.ttype == "many2one" and field.relation:
             target = env[field.relation]._table if field.relation in env else field.relation.replace(".", "_")
             info += f" -> holds the id of a row in {target} ({field.relation})"
@@ -705,14 +820,27 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
         # other. Everything in `fields` may go in a SELECT list; nothing in
         # `related_tables` may.
         "related_tables": joins,
+        # Per-company values that are NOT columns anywhere on this table.
+        "company_dependent_values": properties,
         "note": (
             "`fields` lists every column that exists on this table — computed "
             "and related fields Odoo does not store are deliberately omitted, "
-            "because selecting one fails. Rows belonging to this record live "
+            "because selecting one fails. If a name you expected is not in "
+            "`fields`, it is not a column here: look for it under "
+            "`related_tables` or `company_dependent_values`, which say where "
+            "it really is, and NEVER select it from this table anyway. Rows "
+            "belonging to this record live "
             "in the tables named under `related_tables`. A field marked "
             "`translated column` is stored as JSON keyed by language: use the "
             "expression given with it, in the SELECT list and in WHERE alike — "
-            "comparing the bare column to text is refused by the database."
+            "comparing the bare column to text is refused by the database. "
+            "Anything under `company_dependent_values` is a per-company value "
+            "held in the ir_property table, not a column here: read it with "
+            "`SELECT value_reference FROM ir_property WHERE name = '<the "
+            "field>' AND res_id = '<this model>,<the row id>'` (a row with a "
+            "NULL res_id is the company-wide default). Before reaching for "
+            "one, check whether you need it at all — when you are preparing a "
+            "document, this system fills these in for itself."
         ),
     }
 

@@ -244,6 +244,31 @@ def _field_spec(field_name: str, field) -> dict[str, Any]:
         # so it maps to the protocol only on derived fields; a plain stored
         # field marked readonly (move_type) is genuinely the agent's to set.
         "read_only": bool(field.readonly and (field.compute or field.related)),
+        # THE SYSTEM WORKS THIS ONE OUT FOR ITSELF.
+        #
+        # Odoo's commonest accounting pattern is `compute=..., store=True,
+        # readonly=False`: the system derives a value and keeps yours if you
+        # send one. `account.move.line.account_id`, `price_unit`, `tax_ids`,
+        # `balance`; `account.move.journal_id`, `currency_id`, `date`,
+        # `invoice_payment_term_id` are all of this kind — an invoice line
+        # carrying nothing but a product and a quantity comes out complete,
+        # priced and taxed, because the system fills the rest in from the
+        # product, the partner and the journal.
+        #
+        # Published because a spec that does not say so reads as "twenty
+        # ordinary fields you had better fill in". Live, that is exactly what
+        # happened: asked for a two-line invoice the agent went looking for
+        # the customer's receivable account, the product's selling price, the
+        # product's tax, the category's income account and the company's
+        # journal — seventy-three failed queries against internal tables that
+        # hold none of those as plain columns, and a payload that then
+        # duplicated every line the system was going to build anyway.
+        #
+        # It is NOT `read_only`: a written value is kept and wins, so a
+        # journal entry's debit and credit — stated by the work — still go in.
+        # The rule the agent is given is "send it when the work states it;
+        # never go looking it up".
+        "derived": bool(field.compute and field.store and not field.readonly),
         "options": options,
         "default": None,
     }
@@ -290,6 +315,35 @@ def _doctype_hint(env, doctype: str) -> str:
     from . import agent_api_service
 
     return agent_api_service._model_suggestions(env, str(doctype or ""))
+
+
+def _mark_tables_that_are_the_same_rows(child_tables: list[dict[str, Any]]) -> None:
+    """Say which of a document's row tables are two views of ONE set of rows.
+
+    TWO NAMES, ONE TABLE, AND FILLING IN BOTH DOUBLES THE DOCUMENT. An Odoo
+    invoice publishes `invoice_line_ids` and `line_ids`; both are one2many onto
+    `account.move.line` through the same `move_id`, and the first is simply the
+    second filtered to the product lines. An agent reading the spec sees two
+    plausible row tables and has no way to know that. Live, it filled in both
+    with the same product line — and the entry came out at 750 against a stated
+    330, with four lines where there were meant to be two.
+
+    Detected rather than listed, from the two facts that define it: the same
+    target model reached through the same linking field. Nothing here names a
+    model or a field, so a document type nobody has looked at yet is covered
+    the first time it is asked about.
+    """
+    by_rows: dict[tuple[str, str], list[str]] = {}
+    for table in child_tables:
+        key = (str(table.get("child_doctype") or ""), str(table.pop("_inverse", "")))
+        if not all(key):
+            continue
+        by_rows.setdefault(key, []).append(str(table["fieldname"]))
+    for table in child_tables:
+        name = str(table["fieldname"])
+        for names in by_rows.values():
+            if name in names and len(names) > 1:
+                table["same_rows_as"] = [other for other in names if other != name]
 
 
 def build_document_spec(env, doctype: str) -> dict[str, Any]:
@@ -350,10 +404,15 @@ def build_document_spec(env, doctype: str) -> dict[str, Any]:
                 # at all — and the model then invented column names.
                 "child_doctype": comodel,
                 "fields": child_fields,
+                # Filled in below, once every table of this document is known.
+                "same_rows_as": [],
+                "_inverse": getattr(field, "inverse_name", "") or "",
             })
             continue
 
         fields_spec.append(_field_spec(name, field))
+
+    _mark_tables_that_are_the_same_rows(child_tables)
 
     return {
         # THIS SYSTEM'S OWN SPELLING, NOT THE CALLER'S. A caller's words are
@@ -795,7 +854,67 @@ def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict
 # ─── write_batch ─────────────────────────────────────────────────────────────
 
 
-def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
+def _the_company_of(env, doctype: str, values: Mapping[str, Any]):
+    """Which company this document says it is in, as an id, or None.
+
+    Read BEFORE any other reference is resolved, because it is what settles the
+    ones that are otherwise a genuine tie. A business with two companies has
+    two journals called "Customer Invoices", two receivable accounts and two of
+    most things — correctly, because they are two sets of books.
+    """
+    if "company_id" not in env[doctype]._fields:
+        return None
+    stated = values.get("company_id")
+    if stated in (None, "", False):
+        return None
+    try:
+        resolved = _link_target(env, "res.company", "company_id", stated)
+    except Exception:
+        # The company itself could not be resolved. Whatever is wrong with it
+        # will be reported when it is written; it must not take the rest of the
+        # document down from here.
+        return None
+    return resolved if isinstance(resolved, int) and resolved else None
+
+
+def _in_this_company(target, matches, company):
+    """The candidates that belong to *company*, plus the ones shared by all.
+
+    TWO SETS OF BOOKS ARE TWO DIFFERENT RECORDS WITH ONE NAME, and which of
+    them is meant is not a question for the customer — the document itself has
+    already answered it. An invoice being raised in EG Company posts to EG
+    Company's "Customer Invoices" journal; there is no other reading.
+
+    A record belonging to no company in particular is kept, because it is
+    usable from every company and so is never the wrong one of a pair.
+
+    This is a TIE-BREAK, never a filter. It is reached only once a name has
+    matched more than one record, so nothing narrows a search that was already
+    going to succeed — which is the failure the company-is-a-default rule
+    exists to prevent.
+    """
+    owner = "company_id" if "company_id" in target._fields else (
+        "company_ids" if "company_ids" in target._fields else "")
+    if not owner:
+        return matches
+    kept = []
+    for record_id, label in matches:
+        owned = target.browse(record_id)[owner]
+        ids = owned.ids if hasattr(owned, "ids") else ([owned.id] if owned else [])
+        if not ids or company in ids:
+            kept.append((record_id, label))
+    return kept or matches
+
+
+def _derived_here(parent, field_name: str) -> bool:
+    """Whether the document's own model works this field out for itself."""
+    field = getattr(parent, "_fields", {}).get(field_name) if parent is not None else None
+    return bool(field is not None and field.compute and field.store
+                and not field.readonly)
+
+
+def _link_target(env, model_name: str, field_name: str, value: Any,
+                 company=None, parent=None) -> int:
     """The id of the record a Link field names, found the way a person would.
 
     THE AGENT SENDS A NAME, AND IT IS RIGHT TO.
@@ -874,11 +993,31 @@ def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
         )
         refusal.field_path = field_name
         raise refusal
+    if len(matches) > 1 and company:
+        # The document has already said which set of books it is in.
+        matches = _in_this_company(target, matches, company)
+    if len(matches) == 1:
+        return matches[0][0]
     if len(matches) > 1:
         names = ", ".join(f'"{label}"' for _id, label in matches[:3])
+        # A NAME THIS SYSTEM WAS NEVER ASKED FOR. The fields it derives are
+        # exactly the ones whose names repeat: a business with two companies
+        # has two taxes called "14%", two journals called "Customer Invoices"
+        # and two receivable accounts. Live, one such field was filled in by
+        # name, could not be told apart, and a two-line invoice was rebuilt
+        # three times and never recorded — over a tax this system was always
+        # going to apply by itself. The refusal says so, because the way out is
+        # not to pick one: it is to stop sending the field.
+        leave_it_out = (
+            f' This system fills "{field_name}" in for itself from the party, '
+            f'the item and the journal — so the fix is not to pick one of '
+            f'these. Leave "{field_name}" out of the document altogether and '
+            f'let it be derived.'
+            if _derived_here(parent, field_name) else ""
+        )
         refusal = WriteRejectedError(
             f'"{text}" matches more than one of your {model_name} records '
-            f'({names}). Tell me which one and I will use it.',
+            f'({names}). Tell me which one and I will use it.{leave_it_out}',
             code="LINK_AMBIGUOUS",
         )
         refusal.field_path = field_name
@@ -886,8 +1025,45 @@ def _link_target(env, model_name: str, field_name: str, value: Any) -> int:
     return matches[0][0]
 
 
+def _refuse_two_views_of_one_table(model, values: Mapping[str, Any]) -> None:
+    """Refuse a payload that fills in one set of rows twice under two names.
+
+    THE SPEC SAYS SO IN ADVANCE AND THIS IS THE BACKSTOP. An Odoo invoice
+    reaches the agent with both `invoice_line_ids` and `line_ids`, which are
+    the same rows through the same link; a payload carrying both appends each
+    line twice, and the resulting document balances, so nothing downstream
+    complains. A doubled ledger that passes every check is the worst outcome
+    this connector can produce, and it is not one the agent can be trusted to
+    avoid by reading a note — a live plan carried both tables with the same
+    product line on each.
+
+    Refused rather than merged. Which of the two the agent meant is not
+    knowable here, and picking one would silently discard rows somebody
+    approved. The message names both, so the next attempt sends one.
+    """
+    filled = [
+        name for name, value in values.items()
+        if isinstance(value, (list, tuple)) and value
+        and getattr(model._fields.get(name), "type", "") == "one2many"
+    ]
+    for position, name in enumerate(filled):
+        field = model._fields[name]
+        for other in filled[position + 1:]:
+            twin = model._fields[other]
+            if (field.comodel_name == twin.comodel_name
+                    and getattr(field, "inverse_name", None)
+                    and getattr(field, "inverse_name", None)
+                    == getattr(twin, "inverse_name", None)):
+                raise WriteRejectedError(
+                    f"'{name}' and '{other}' are two views of the SAME rows on "
+                    f"{model._name}, so filling in both records every line "
+                    f"twice. Send the lines under one of them only.",
+                    code="DUPLICATE_ROWS",
+                )
+
+
 def _odoo_values(env, doctype: str, values: Mapping[str, Any],
-                 replacing: bool = False) -> dict[str, Any]:
+                 replacing: bool = False, company=None) -> dict[str, Any]:
     """The agent's payload as Odoo's ORM expects to receive it.
 
     Two translations, and both are Odoo's own conventions rather than anything
@@ -922,6 +1098,11 @@ def _odoo_values(env, doctype: str, values: Mapping[str, Any],
         underneath it to replace.
     """
     model = env[doctype]
+    _refuse_two_views_of_one_table(model, values)
+    # SETTLED FIRST, BECAUSE EVERY OTHER REFERENCE MAY DEPEND ON IT. A row
+    # inherits its document's company: an invoice line's account belongs to the
+    # books the invoice is being raised in, and the line does not say so itself.
+    company = _the_company_of(env, doctype, values) or company
     out: dict[str, Any] = {}
     for key, value in values.items():
         field = model._fields.get(key)
@@ -929,19 +1110,20 @@ def _odoo_values(env, doctype: str, values: Mapping[str, Any],
             out[key] = value
         elif field.type == "one2many":
             rows = [
-                (0, 0, _odoo_values(env, field.comodel_name, row))
+                (0, 0, _odoo_values(env, field.comodel_name, row, company=company))
                 for row in _rows_of(value)
             ]
             out[key] = [(5, 0, 0), *rows] if replacing else rows
         elif field.type == "many2many":
             if isinstance(value, (list, tuple)):
                 out[key] = [(6, 0, [
-                    _link_target(env, field.comodel_name, key, item) for item in value
+                    _link_target(env, field.comodel_name, key, item, company, model)
+                    for item in value
                 ])]
             else:
                 out[key] = value
         elif field.type == "many2one":
-            out[key] = _link_target(env, field.comodel_name, key, value)
+            out[key] = _link_target(env, field.comodel_name, key, value, company, model)
         else:
             out[key] = value
     return out
