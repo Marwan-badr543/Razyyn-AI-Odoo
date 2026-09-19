@@ -770,35 +770,6 @@ def _relay(env, uid, session, response) -> None:
                     "agent": data.get("agent", ""),
                 })
 
-            elif current_event == "multi_agent_start":
-                publish(env, uid, session_id, "agent_multi_start", {
-                    "session_id": session_id,
-                    "agents": data.get("agents", []),
-                    "total": data.get("total", 0),
-                })
-
-            elif current_event == "agent_start":
-                publish(env, uid, session_id, "agent_subagent_start", {
-                    "session_id": session_id,
-                    "agent": data.get("agent", ""),
-                    "index": data.get("index", 0),
-                    "total": data.get("total", 0),
-                })
-
-            elif current_event == "agent_complete":
-                publish(env, uid, session_id, "agent_subagent_complete", {
-                    "session_id": session_id,
-                    "agent": data.get("agent", ""),
-                    "index": data.get("index", 0),
-                    "total": data.get("total", 0),
-                })
-
-            elif current_event == "compilation_start":
-                publish(env, uid, session_id, "agent_compilation_start", {
-                    "session_id": session_id,
-                    "agents": data.get("agents", []),
-                })
-
             elif current_event == "done":
                 answered = True
                 spoken, questions = transcript._readable_response(data.get("response", ""))
@@ -817,6 +788,27 @@ def _relay(env, uid, session, response) -> None:
                     # agent is waiting on a person.
                     publish(env, uid, session_id, "agent_clarification_requested",
                             {"session_id": session_id, "questions": questions})
+
+            elif current_event == "aside":
+                # A MANAGER SENTENCE THAT IS NOT THE TURN'S ANSWER — "added the
+                # VAT check as step 4", a reply to something asked while the
+                # work ran, the sentence that presents a waiting step's
+                # question. Stored like any message and drawn as its own
+                # bubble above the working one; the run goes on.
+                spoken = data.get("text", "")
+                if spoken:
+                    save_chat_history(env, session, "ai", spoken)
+                    publish(env, uid, session_id, "agent_aside",
+                            {"session_id": session_id, "text": spoken})
+
+            elif current_event == "noted":
+                # THE MANAGER HEARD IT MID-RUN. The composer stays open while
+                # the manager works, and a message sent then reaches the run
+                # in progress rather than starting one of its own. There is
+                # no answer of this turn's own to wait for, so it simply ends.
+                answered = True
+                publish(env, uid, session_id, "agent_message_noted",
+                        {"session_id": session_id})
 
             elif current_event == "cancelled":
                 # The customer stopped the work. That IS this turn's answer;
