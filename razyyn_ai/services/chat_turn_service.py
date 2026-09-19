@@ -46,6 +46,7 @@ from odoo import api, fields, SUPERUSER_ID
 from . import ocr_service
 from .held_words import HeldWords
 from . import transcript
+from .server_config import server_url as configured_server_url
 
 _logger = logging.getLogger(__name__)
 
@@ -338,9 +339,7 @@ def fold_the_answer_in(env, session, answer: str) -> bool:
 
 # ── Talking to the agent server ─────────────────────────────────────────────
 def server_url(env) -> str:
-    return env["ir.config_parameter"].sudo().get_param(
-        "razyyn_ai.server_url", "http://localhost:8010"
-    ).rstrip("/")
+    return configured_server_url(env)
 
 
 class SessionEnded(Exception):
