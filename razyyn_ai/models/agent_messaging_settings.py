@@ -36,7 +36,7 @@ WHY THERE IS EXACTLY ONE OF THESE RECORDS
     make one and the menu opens the existing one rather than a list.
 """
 
-from odoo import _, api, fields, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 #: The channel keys on the wire. Spelled the agent's way — `gmail` is the email
@@ -67,7 +67,7 @@ class AgentMessagingSettings(models.Model):
     # The agent calls the channel `gmail`; an administrator reading this form
     # sees "Email", because what matters to them is the mailbox it leaves from.
     email_enabled = fields.Boolean(
-        string="Email Enabled", default=True,
+        default=True,
         help="Let the agent send email on this company's behalf.",
     )
     email_from = fields.Char(
@@ -108,17 +108,17 @@ class AgentMessagingSettings(models.Model):
     )
 
     # ── Telegram ─────────────────────────────────────────────────────────────
-    telegram_enabled = fields.Boolean(string="Telegram Enabled", default=False)
+    telegram_enabled = fields.Boolean(default=False)
     telegram_bot_token = fields.Char(
-        string="Telegram Bot Token", groups="base.group_system",
+        groups="base.group_system",
         help="From BotFather. Only a system administrator can read or change it.",
     )
     telegram_last_error = fields.Char(string="Last Telegram Error", readonly=True)
 
     # ── Slack ────────────────────────────────────────────────────────────────
-    slack_enabled = fields.Boolean(string="Slack Enabled", default=False)
+    slack_enabled = fields.Boolean(default=False)
     slack_bot_token = fields.Char(
-        string="Slack Bot Token", groups="base.group_system",
+        groups="base.group_system",
         help="The bot user OAuth token (xoxb-…). Only a system administrator "
              "can read or change it.",
     )
@@ -171,7 +171,7 @@ class AgentMessagingSettings(models.Model):
         """
         vals_list = list(vals_list)
         if self.sudo().search_count([]) + len(vals_list) > 1:
-            raise UserError(_(
+            raise UserError(self.env._(
                 "There is one messaging configuration for this system and it "
                 "already exists. Open it from Razyyn AI → Messaging Channels "
                 "and edit it rather than adding a second one."
@@ -189,7 +189,7 @@ class AgentMessagingSettings(models.Model):
         settings = self.get_settings_singleton()
         return {
             "type": "ir.actions.act_window",
-            "name": _("Messaging Channels"),
+            "name": self.env._("Messaging Channels"),
             "res_model": self._name,
             "view_mode": "form",
             "res_id": settings.id,

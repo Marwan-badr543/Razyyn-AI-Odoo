@@ -60,7 +60,7 @@ class AgentMessagingDestination(models.Model):
              "'Marwan'. This is the only part the agent is ever told.",
     )
     address = fields.Char(
-        string="Address", required=True,
+        required=True,
         help="Email: the address itself. Telegram: the numeric chat id. "
              "Slack: the channel id (C…). A bot can only reach a chat that "
              "already exists.",
@@ -69,7 +69,7 @@ class AgentMessagingDestination(models.Model):
         string="Default",
         help="Where a message goes when the accountant names no destination.",
     )
-    notes = fields.Char(string="Notes")
+    notes = fields.Char()
 
     @api.model_create_multi
     def create(self, vals_list):

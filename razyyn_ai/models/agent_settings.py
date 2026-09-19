@@ -64,7 +64,6 @@ class AgentSettings(models.Model):
         help="Long-lived JWT refresh token for renewing access tokens.",
     )
     custom_instructions = fields.Text(
-        string="Custom Instructions",
         help="Accountant system prompt instructions sent with every chat turn.",
     )
     #: THE CARD HAS NOWHERE TO LIVE UNLESS A FIELD PUTS IT THERE.
@@ -201,7 +200,7 @@ class AgentSettings(models.Model):
     def _check_company_present(self):
         for record in self:
             if not record.company_id:
-                raise ValidationError("An agent connection must belong to a company.")
+                raise ValidationError(self.env._("An agent connection must belong to a company."))
 
     # NO `name` ALIAS, AND NO `allow_write_operations`/`last_synced_at`/
     # `last_error`/`agent_user_id` EITHER.
@@ -217,7 +216,7 @@ class AgentSettings(models.Model):
         string="Platform Connected", compute="_compute_is_platform_connected"
     )
     connection_status = fields.Char(
-        string="Connection Status", compute="_compute_connection_status"
+        compute="_compute_connection_status"
     )
     platform_api_base_url = fields.Char(
         string="Platform API Base URL", default="https://app.razyyn.com"

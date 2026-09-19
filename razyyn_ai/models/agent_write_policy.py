@@ -17,7 +17,7 @@ Mirrors Frappe Agent Write Policy:
 - posting_date_max_days_forward: Maximum days forward for future-dating (0 = forbidden)
 """
 
-from odoo import _, api, fields, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 
@@ -32,7 +32,7 @@ class AgentWritePolicy(models.Model):
         help="Master switch authorizing the agent to create and modify accounting records.",
     )
     dry_run_only = fields.Boolean(
-        string="Dry Run Only", default=False,
+        default=False,
         help="When enabled, entries are validated against ledger constraints and discarded.",
     )
     require_approval = fields.Boolean(
@@ -56,11 +56,11 @@ class AgentWritePolicy(models.Model):
         help="Accounts that must never be modified by AI operations (e.g., Retained Earnings).",
     )
     max_documents_per_run = fields.Integer(
-        string="Max Documents Per Run", default=0,
+        default=0,
         help="Maximum number of documents the agent can create in one turn (0 = unlimited).",
     )
     max_total_amount_per_run = fields.Float(
-        string="Max Total Amount Per Run", default=0.0,
+        default=0.0,
         help="Maximum monetary amount the agent can post in one run (0 = unlimited).",
     )
     posting_date_max_days_back = fields.Integer(
@@ -84,11 +84,9 @@ class AgentWritePolicy(models.Model):
         string="Max Documents Per Batch", related="max_documents_per_run", readonly=False, store=True
     )
     earliest_posting_date = fields.Date(
-        string="Earliest Posting Date",
         help="Entries dated before this date are forbidden.",
     )
     latest_posting_date = fields.Date(
-        string="Latest Posting Date",
         help="Entries dated after this date are forbidden.",
     )
 
@@ -105,7 +103,7 @@ class AgentWritePolicy(models.Model):
         """
         vals_list = list(vals_list)
         if self.sudo().search_count([]) + len(vals_list) > 1:
-            raise UserError(_(
+            raise UserError(self.env._(
                 "There is one write governance policy for this system and it "
                 "already exists. Open it from Razyyn AI → Write Policy and "
                 "edit it rather than adding a second one."
@@ -118,7 +116,7 @@ class AgentWritePolicy(models.Model):
         policy = self.get_policy_singleton()
         return {
             "type": "ir.actions.act_window",
-            "name": _("Write Governance Policy"),
+            "name": self.env._("Write Governance Policy"),
             "res_model": self._name,
             "view_mode": "form",
             "res_id": policy.id,

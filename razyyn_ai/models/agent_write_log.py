@@ -30,9 +30,9 @@ class AgentWriteLog(models.Model):
     _rec_name = "idempotency_key"
 
     timestamp = fields.Datetime(default=fields.Datetime.now, required=True, index=True)
-    user_id = fields.Many2one("res.users", string="User", index=True)
+    user_id = fields.Many2one("res.users", index=True)
     session_id = fields.Char(string="Session ID", index=True)
-    target_model = fields.Char(string="Target Model", index=True)
+    target_model = fields.Char(index=True)
     target_record_id = fields.Integer(string="Target Record ID")
     action_type = fields.Selection([
         ("create", "Create"),
@@ -59,11 +59,11 @@ class AgentWriteLog(models.Model):
              "recorded and done.",
     )
     payload = fields.Text(string="Payload (JSON)")
-    rejection_reason = fields.Text(string="Rejection Reason")
-    idempotency_key = fields.Char(string="Idempotency Key", index=True, required=True)
+    rejection_reason = fields.Text()
+    idempotency_key = fields.Char(index=True, required=True)
     response_data = fields.Text(string="Response Data (JSON)")
-    error_details = fields.Text(string="Error Details")
-    dry_run = fields.Boolean(string="Dry Run", default=False)
+    error_details = fields.Text()
+    dry_run = fields.Boolean(default=False)
 
     _sql_constraints = [
         ("idempotency_key_unique", "unique(idempotency_key)",

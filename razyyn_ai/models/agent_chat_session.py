@@ -69,7 +69,7 @@ class AgentChatSession(models.Model):
     ]
 
     message_count = fields.Integer(
-        compute="_compute_message_count", string="Message Count",
+        compute="_compute_message_count",
         help="How many turns this conversation holds.",
     )
 

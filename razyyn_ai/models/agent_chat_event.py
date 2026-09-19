@@ -105,7 +105,7 @@ class AgentChatEvent(models.Model):
         only what it is going to send.
         """
         tools.create_index(
-            self._cr,
+            self.env.cr,
             "razyyn_agent_chat_event_user_id_id_idx",
             self._table,
             ["user_id", "id"],
