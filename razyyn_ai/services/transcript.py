@@ -282,7 +282,9 @@ def _collapsible_question(spoken: str, questions: list, answer: str = "") -> str
 
 	headline = asked[0]
 	if len(asked) > 1:
-		headline = _("{0} (and {1} more)").format(headline, len(asked) - 1)
+		# pylint: disable=prefer-env-translation
+		# No env/self here: this is a plain function, not a model method.
+		headline = _("%(headline)s (and %(more)s more)", headline=headline, more=len(asked) - 1)
 
 	# `question` is LLM-authored text (asked[1:] comes straight from the
 	# clarification payload), so it gets the same escape() treatment as
@@ -296,10 +298,11 @@ def _collapsible_question(spoken: str, questions: list, answer: str = "") -> str
 		# THEIR OWN WORDS, LABELLED AND MARKED. The label is for the customer
 		# and is translated; the class is for the renderer and never is.
 		body = (body + "\n\n" if body else "") + _ANSWER_BLOCK.format(
-			label=escape(_("You answered: {0}").format(said)),
+			label=escape(_("You answered: %(said)s", said=said)),  # pylint: disable=prefer-env-translation
 		)
 
 	else:
+		# pylint: disable-next=prefer-env-translation
 		body = (body + "\n\n" if body else "") + _("Awaiting your answer")
 
 	# The blank line after </summary> is load-bearing: without it a Markdown

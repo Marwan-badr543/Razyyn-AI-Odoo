@@ -76,8 +76,8 @@ def ensure_agent_user(env) -> models.Model:
             acc_group = env.ref("account.group_account_user")
             if acc_group:
                 groups.append(acc_group.id)
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.debug("Razyyn AI: account.group_account_user not available: %s", exc)
 
         user = env["res.users"].sudo().create({
             "name": AGENT_USER_NAME,
@@ -141,13 +141,16 @@ def platform_request(
             try:
                 b = response.json()
                 detail = b.get("detail") or detail
-            except Exception:
-                pass
-            raise UserError(f"Razyyn Platform Error ({response.status_code}): {detail}")
+            except Exception as exc:
+                _logger.debug("Razyyn AI: platform error body was not JSON: %s", exc)
+            raise UserError(env._(
+                "Razyyn Platform Error (%(status_code)s): %(detail)s",
+                status_code=response.status_code, detail=detail,
+            ))
         return response.json() or {}
     except requests.exceptions.RequestException as exc:
         _logger.error("Razyyn platform request failed: %s", exc)
-        raise UserError(f"Could not reach Razyyn platform: {exc}")
+        raise UserError(env._("Could not reach Razyyn platform: %(exc)s", exc=exc))
 
 
 def get_write_connection_status(env, user_id: int) -> dict[str, Any]:
@@ -199,7 +202,7 @@ def connect_write_access(env, user_id: int, enable_recording: bool = False) -> d
     # told to sign in first.
     user_settings = env["razyyn.agent.settings"].sudo().search([("user_id", "=", user_id)], limit=1)
     if not user_settings or not user_settings.access_token:
-        raise UserError("Please sign in to Razyyn from the chat interface first.")
+        raise UserError(env._("Please sign in to Razyyn from the chat interface first."))
 
     # Provision user and key
     agent_user = ensure_agent_user(env)
@@ -313,7 +316,7 @@ def rotate_agent_credentials(env, user_id: int) -> dict[str, Any]:
         [("user_id", "=", user_id)], limit=1
     )
     if not user_settings or not user_settings.access_token:
-        raise UserError("Please sign in to Razyyn from the chat interface first.")
+        raise UserError(env._("Please sign in to Razyyn from the chat interface first."))
 
     _record, plaintext_key = ensure_agent_credentials(env, force_new=True)
     # Committed before the platform is told, for the same reason connecting is:
@@ -354,7 +357,7 @@ def set_recording_enabled(env, user_id: int, enabled: bool) -> dict[str, Any]:
     """Toggle recording on the platform."""
     user_settings = env["razyyn.agent.settings"].sudo().search([("user_id", "=", user_id)], limit=1)
     if not user_settings or not user_settings.erp_connection_id:
-        raise UserError("Please connect this Odoo instance to Razyyn first.")
+        raise UserError(env._("Please connect this Odoo instance to Razyyn first."))
 
     result = platform_request(
         env, "POST", f"/api/create/connections/{user_settings.erp_connection_id}/write-enabled",

@@ -23,7 +23,7 @@ IT GRANTS NOTHING
 
 from __future__ import annotations
 
-from odoo import _, api, fields, models
+from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 
 
@@ -64,9 +64,9 @@ class IrModel(models.Model):
         self.ensure_one()
         target = self.env.get(self.model)
         if target is None:
-            raise UserError(_("The model %s is not installed on this database.", self.model))
+            raise UserError(self.env._("The model %s is not installed on this database.", self.model))
         if target._abstract:
-            raise UserError(_(
+            raise UserError(self.env._(
                 "%s is an abstract model: it defines behaviour that other models "
                 "reuse and has no records of its own.", self.model))
 
@@ -103,7 +103,9 @@ class IrModel(models.Model):
         if checker is not None:
             try:
                 return not checker("create", raise_exception=False)
-            except TypeError:
+            # Not a swallow: this signature didn't match, so control falls
+            # through to the next checker below, per the docstring above.
+            except TypeError:  # pylint: disable=except-pass
                 pass
             except Exception:
                 return True

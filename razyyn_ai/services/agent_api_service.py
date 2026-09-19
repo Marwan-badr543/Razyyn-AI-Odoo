@@ -227,6 +227,10 @@ def validate_and_execute_query(env, sql_query: str,
             # a server-controlled int, never agent text, so inlining it is safe
             # and keeps psycopg2 out of the agent's SQL entirely.
             capped = f"SELECT * FROM (\n{clean_query}\n) AS razyyn_agent_capped LIMIT {int(max_rows) + 1}"
+            # pylint: disable=sql-injection
+            # False positive: clean_query already passed assert_query_is_read_only
+            # above, and max_rows is int()-cast server config, never agent text —
+            # see the comment block above for why this can't be parameterized.
             cr.execute(capped)
             rows = cr.dictfetchall()
     except ForbiddenQueryError:
@@ -390,8 +394,8 @@ def _explain(env, query: str, exc: Exception) -> str:
             shown = columns[:_MAX_COLUMNS_NAMED]
             more = "" if len(columns) == len(shown) else f" (+{len(columns) - len(shown)} more)"
             lines.append(f"{table} really has: {', '.join(shown)}{more}")
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.debug("Razyyn AI: could not build a 'did you mean' hint: %s", exc)
 
     return "\n".join(lines)
 

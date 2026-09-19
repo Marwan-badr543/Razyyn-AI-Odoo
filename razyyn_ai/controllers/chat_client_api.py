@@ -182,7 +182,7 @@ def _session(session_id: str):
 def _owned_session_or_refuse(session_id: str):
     session = _session(session_id)
     if not session:
-        raise UserError("Chat session not found.")
+        raise UserError(request.env._("Chat session not found."))
     return session
 
 
@@ -267,18 +267,18 @@ class RazyynChatApi(http.Controller):
                            company_name=None, **_kwargs):
         email = (email or "").strip()
         if not email or not password:
-            raise UserError("Email and password are required.")
+            raise UserError(request.env._("Email and password are required."))
 
         if mode == "signup":
             return _ok(self._sign_up(email, password, company_name))
         if mode == "login":
             return _ok(self._sign_in(email, password))
-        raise UserError("Invalid mode specified.")
+        raise UserError(request.env._("Invalid mode specified."))
 
     def _sign_up(self, email, password, company_name):
         company_name = (company_name or request.env.company.name or "").strip()
         if not company_name:
-            raise UserError("Company Name is required for registration.")
+            raise UserError(request.env._("Company Name is required for registration."))
         # `_settings`, not `_mine`: this asks whether a record for THIS address
         # already exists, and the fallback would answer yes about a different
         # one and refuse a legitimate sign-up.
@@ -290,7 +290,7 @@ class RazyynChatApi(http.Controller):
         # failed registration. It is reused instead, with a fresh key.
         existing = _settings(email)
         if existing and (existing.sudo().access_token or existing.erp_connection_id):
-            raise UserError(f"A connection already exists for {email}.")
+            raise UserError(request.env._("A connection already exists for %(email)s.", email=email))
 
         # The key is minted BEFORE the account, because registration hands it to
         # the platform: it is how the agent gets back in to read this Odoo.
@@ -326,7 +326,7 @@ class RazyynChatApi(http.Controller):
             _discard(settings)
             _logger.warning("Razyyn AI: registration could not be sent: %s", exc)
             raise UserError(
-                "Could not reach the Razyyn service. Please make sure it is running."
+                request.env._("Could not reach the Razyyn service. Please make sure it is running.")
             ) from exc
 
         if response.status_code != 201:
@@ -361,7 +361,7 @@ class RazyynChatApi(http.Controller):
         except requests.exceptions.RequestException as exc:
             _logger.warning("Razyyn AI: sign-in could not be sent: %s", exc)
             raise UserError(
-                "Could not reach the Razyyn service. Please make sure it is running."
+                request.env._("Could not reach the Razyyn service. Please make sure it is running.")
             ) from exc
         if response.status_code != 200:
             raise UserError(self._detail(
@@ -371,18 +371,18 @@ class RazyynChatApi(http.Controller):
             body = response.json()
         except (ValueError, TypeError) as exc:
             raise UserError(
-                "The Razyyn service returned an invalid sign-in response. Please try again."
+                request.env._("The Razyyn service returned an invalid sign-in response. Please try again.")
             ) from exc
 
         access_token = body.get("access_token")
         refresh_token = body.get("refresh_token")
         if not isinstance(access_token, str) or not access_token.strip():
             raise UserError(
-                "The Razyyn service did not return an access token. Please try again."
+                request.env._("The Razyyn service did not return an access token. Please try again.")
             )
         if not isinstance(refresh_token, str) or not refresh_token.strip():
             raise UserError(
-                "The Razyyn service did not return a refresh token. Please try again."
+                request.env._("The Razyyn service did not return a refresh token. Please try again.")
             )
         return {
             "access_token": access_token,
@@ -418,9 +418,9 @@ class RazyynChatApi(http.Controller):
                 )
             except requests.exceptions.RequestException as exc:
                 _logger.warning("Razyyn AI: account deletion could not be sent: %s", exc)
-                raise UserError("Could not reach the Razyyn service. Please try again.") from exc
+                raise UserError(request.env._("Could not reach the Razyyn service. Please try again.")) from exc
             if response.status_code not in (200, 204, 404):
-                raise UserError("The agent account could not be deleted. Please try again.")
+                raise UserError(request.env._("The agent account could not be deleted. Please try again."))
 
         settings.unlink()
         return _ok({"success": True})
@@ -465,15 +465,15 @@ class RazyynChatApi(http.Controller):
         """
         wanted = (language or "").strip()[:2].lower()
         if not wanted:
-            raise UserError("No language was chosen.")
+            raise UserError(request.env._("No language was chosen."))
 
         installed = request.env["res.lang"].sudo().search([("active", "=", True)])
         match = next((lang for lang in installed if lang.code.lower().startswith(wanted)), None)
         if not match:
-            raise UserError(
+            raise UserError(request.env._(
                 "That language is not installed in Odoo yet. An administrator can "
                 "add it under Settings -> Translations -> Languages."
-            )
+            ))
         request.env.user.sudo().write({"lang": match.code})
         return _ok({"success": True, "lang": match.code})
 
@@ -489,18 +489,18 @@ class RazyynChatApi(http.Controller):
     @http.route("/razyyn/api/create_chat_with_id", type="json", auth="user")
     def create_chat_with_id(self, session_id=None, title=None, **_kwargs):
         if not session_id:
-            raise UserError("Session ID is required.")
+            raise UserError(request.env._("Session ID is required."))
         # The client picks this identifier, so it must look like one the client
         # generated rather than an arbitrary string that could collide with, or
         # be mistaken for, another customer's session key.
         try:
             uuid.UUID(str(session_id))
         except (ValueError, AttributeError, TypeError):
-            raise UserError("Invalid session identifier.")
+            raise UserError(request.env._("Invalid session identifier."))
         if request.env["razyyn.agent.chat.session"].sudo().search_count(
             [("session_id", "=", session_id)]
         ):
-            raise UserError("Chat session already exists.")
+            raise UserError(request.env._("Chat session already exists."))
 
         session = request.env["razyyn.agent.chat.session"].sudo().create({
             "session_id": session_id,
@@ -513,7 +513,7 @@ class RazyynChatApi(http.Controller):
     @http.route("/razyyn/api/update_chat_title", type="json", auth="user")
     def update_chat_title(self, session_id=None, title=None, **_kwargs):
         if not title:
-            raise UserError("Session ID and Title are required.")
+            raise UserError(request.env._("Session ID and Title are required."))
         session = _owned_session_or_refuse(session_id)
         session.write({"title": title, "last_update": fields.Datetime.now()})
         return _ok(_row(session))
@@ -569,7 +569,7 @@ class RazyynChatApi(http.Controller):
 
         settings = _mine(agent_email)
         if not settings or not settings.access_token:
-            raise UserError("Not authenticated with Razyyn.")
+            raise UserError(request.env._("Not authenticated with Razyyn."))
 
         previous = request.env["razyyn.agent.chat.message"].sudo().search(
             [("session_id", "=", session.id), ("sender", "=", "ai")], order="id desc", limit=1
@@ -677,26 +677,27 @@ class RazyynChatApi(http.Controller):
         """
         session = _owned_session_or_refuse(session_id)
         if not message_name:
-            raise UserError("Message ID is required.")
+            raise UserError(request.env._("Message ID is required."))
         if not (message or "").strip():
-            raise UserError("Message cannot be empty.")
+            raise UserError(request.env._("Message cannot be empty."))
 
         row = request.env["razyyn.agent.chat.message"].sudo().browse(
             int(message_name) if str(message_name).isdigit() else 0
         ).exists()
         if not row or row.session_id.id != session.id:
-            raise UserError("Message not found in this chat.")
+            raise UserError(request.env._("Message not found in this chat."))
         if row.sender != "human":
-            raise UserError("Only your own messages can be edited.")
+            raise UserError(request.env._("Only your own messages can be edited."))
         if row.content == "Approve" or (row.content or "").startswith("Clarification Response:"):
-            raise UserError("This message can't be edited.")
+            raise UserError(request.env._("This message can't be edited."))
 
         # Stop first: a run still answering the discarded branch must not race
         # the fresh one for the same conversation.
         try:
             self.cancel_agent(session_id=session.session_id, agent_email=agent_email)
-        except Exception:
-            pass  # Nothing in flight is the common case, not a failure.
+        except Exception as exc:
+            # Nothing in flight is the common case, not a failure.
+            _logger.debug("Razyyn AI: cancel_agent before edit found nothing to stop: %s", exc)
 
         # The edited turn is sent again below as a brand new row, so it is
         # dropped here rather than rewritten -- one code path for "what a
@@ -730,7 +731,7 @@ class RazyynChatApi(http.Controller):
 
         settings = _mine(agent_email)
         if not settings:
-            raise UserError("Not authenticated with Razyyn.")
+            raise UserError(request.env._("Not authenticated with Razyyn."))
 
         def send(headers):
             headers = dict(headers, **{"Content-Type": "application/json"})

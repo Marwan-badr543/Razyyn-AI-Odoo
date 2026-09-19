@@ -51,7 +51,7 @@ class AgentMessageLog(models.Model):
     #: 1131578960" is not something anybody can check.
     destination_label = fields.Char(string="Destination Name")
 
-    subject = fields.Char(string="Subject")
+    subject = fields.Char()
     body = fields.Text(string="Message Body")
     attachment_names = fields.Char(string="Attachments")
 
@@ -65,11 +65,11 @@ class AgentMessageLog(models.Model):
     #: something was sent only when there is one of these; "nothing raised" is
     #: not evidence of delivery.
     provider_message_id = fields.Char(string="Provider Message ID")
-    error_code = fields.Char(string="Error Code")
-    error_message = fields.Text(string="Error Message")
+    error_code = fields.Char()
+    error_message = fields.Text()
 
-    idempotency_key = fields.Char(string="Idempotency Key", index=True, required=True)
+    idempotency_key = fields.Char(index=True, required=True)
     session_id = fields.Char(string="Session ID", index=True)
     run_id = fields.Char(string="Run ID", index=True)
-    requested_by = fields.Many2one("res.users", string="Requested By")
-    approved_by = fields.Char(string="Approved By")
+    requested_by = fields.Many2one("res.users")
+    approved_by = fields.Char()

@@ -3,7 +3,7 @@
 
 {
     "name": "Razyyn AI",
-    "version": "17.0.1.9.0",
+    "version": "17.0.1.9.1",
     "summary": "The Razyyn AI accounting agent, inside Odoo: chat, reading, "
                "and governed recording of entries.",
     "description": """
@@ -25,8 +25,11 @@ by static/src/chat/razyyn_platform.js, so both products get every improvement
 and neither can drift.
     """,
     "author": "Marwan Badr",
+    "maintainer": "Razyyn AI",
+    "website": "https://razyyn.com",
     "license": "LGPL-3",
     "category": "Accounting",
+    "images": ["static/description/connections_screenshot.png"],
     "depends": ["base", "mail", "web", "account"],
     "data": [
         "security/security.xml",
@@ -66,6 +69,5 @@ and neither can drift.
     # very install whose post_init_hook fetches pytesseract. The packages are
     # declared in services/dependencies.py, where something acts on them.
     "post_init_hook": "post_init_hook",
-    "installable": True,
     "application": True,
 }

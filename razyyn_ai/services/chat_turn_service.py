@@ -88,8 +88,8 @@ def publish(env, user_id: int, session_id: str, event: str, message: dict) -> No
         _logger.warning("Razyyn AI: could not publish %s: %s", event, exc)
         try:
             env.cr.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_exc:
+            _logger.debug("Razyyn AI: rollback after publish failure also failed: %s", rollback_exc)
 
 
 #: How long the turn's events are left in place after the answer has been
@@ -175,6 +175,11 @@ def _sweep_events(dbname: str, session_id: str, high_water_mark: int) -> None:
     try:
         with odoo.registry(dbname).cursor() as cr:
             removed = sweep_events(cr, session_id, high_water_mark)
+            # pylint: disable=invalid-commit
+            # This runs on its own cursor in a background thread (see
+            # `thread.start()` above), outside any request lifecycle — there is
+            # no dispatcher to commit on our behalf, so this explicit commit is
+            # required, not a mid-request transaction violation.
             cr.commit()
         if removed:
             _logger.info("Razyyn AI: swept %s delivered event(s) from session %s",
@@ -231,8 +236,8 @@ def save_chat_history(env, session, sender: str, content: str):
         _logger.error("Razyyn AI: could not save a chat message: %s", exc)
         try:
             env.cr.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_exc:
+            _logger.debug("Razyyn AI: rollback after save failure also failed: %s", rollback_exc)
         return None
 
 

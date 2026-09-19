@@ -1,0 +1,97 @@
+<meta charset="utf-8"/>
+<section style="max-width: 960px; margin: 0 auto; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #2b2b33; line-height: 1.55;">
+
+  <div style="display: flex; align-items: center; gap: 18px; margin-bottom: 8px;">
+    <img src="icon.png" alt="Razyyn AI" style="width: 72px; height: 72px; border-radius: 14px;"/>
+    <div>
+      <h1 style="margin: 0; font-size: 30px; color: #111;">Razyyn AI</h1>
+      <p style="margin: 4px 0 0; font-size: 16px; color: #666;">Your complete finance department, powered by AI — inside Odoo.</p>
+    </div>
+  </div>
+
+  <p style="font-size: 15px;">
+    Razyyn AI adds a natural-language finance team to your Odoo backend. It answers
+    accounting questions, analyses your financials, audits your ledgers, reconciles
+    bank statements, and prepares accounting entries for your review — all without
+    leaving Odoo, and <strong>never touching your books without your explicit approval</strong>.
+  </p>
+
+  <p style="font-size: 15px;">
+    It works the way your finance department already does: securely, and in line with
+    <strong>your company's own policies, your country's tax and regulatory rules, and standard
+    accounting principles (IFRS / GAAP)</strong> — all configurable, so the agent reasons and
+    acts the way your organisation actually operates.
+  </p>
+
+  <img src="connections_screenshot.png" alt="Razyyn AI Agent Settings inside Odoo" style="width: 100%; border-radius: 6px; border: 1px solid #e2e2e6; margin: 20px 0;"/>
+
+  <h2 style="font-size: 21px; color: #111; margin-top: 36px;">What it does</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0; width: 26px;">💬</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Ask accounting questions &amp; look things up.</strong> Chart of accounts, customer balances, vendor status, tax rates, IFRS/GAAP guidance — answered against your live data.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">🏦</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Reconcile bank statements.</strong> Upload a statement and the agent matches it against your ledger, classifying differences and proposing settlement entries.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">📄</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Read your documents.</strong> Extracts data from uploaded invoices, receipts and contracts (PDF, DOCX, CSV, Excel, images) — on your own server.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">✅</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Prepare and post entries — with your approval.</strong> Journal entries, payments, customer invoices, vendor bills and more are proposed as a clear card showing every debit, credit, tax and party. Nothing is written to your books until you click <em>Approve</em>.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">📤</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Export &amp; deliver results.</strong> Generates PDF, Excel, CSV and TXT deliverables, and can send reports and alerts by Email, Telegram or Slack.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">🔑</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Zero-credential connection.</strong> No API keys to copy or paste — your Odoo connects to Razyyn AI securely in one click.</td>
+    </tr>
+  </table>
+
+  <h2 style="font-size: 21px; color: #111; margin-top: 36px;">Built to be trusted with your books</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0; width: 26px;">🔒</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Fail-closed by default.</strong> Out of the box the agent has zero write permissions. Every write is bound by both your Odoo access rights and a server-enforced Write Policy you control.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">📐</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Compliant by configuration.</strong> Teach the agent your company's policies, your country's rules and your chart conventions, and every answer, entry and audit finding respects them.</td>
+    </tr>
+    <tr>
+      <td style="vertical-align: top; padding: 8px 14px 8px 0;">🧾</td>
+      <td style="vertical-align: top; padding: 8px 0;"><strong>Append-only, tamper-evident audit logs.</strong> Every write the agent makes is recorded, encrypted credentials protect the connection, and strict tenant data isolation keeps every company's books separate.</td>
+    </tr>
+  </table>
+
+  <h2 style="font-size: 21px; color: #111; margin-top: 36px;">Requirements</h2>
+  <table style="width: 100%; border-collapse: collapse; font-size: 14px; border: 1px solid #e2e2e6;">
+    <tr style="background: #f7f7f9;">
+      <th style="text-align: left; padding: 8px 12px; border-bottom: 1px solid #e2e2e6;">Component</th>
+      <th style="text-align: left; padding: 8px 12px; border-bottom: 1px solid #e2e2e6;">Requirement</th>
+    </tr>
+    <tr><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">Odoo</td><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">17.0 or 18.0</td></tr>
+    <tr><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">Odoo apps</td><td style="padding: 8px 12px; border-bottom: 1px solid #eee;"><code>base</code>, <code>mail</code>, <code>web</code>, <code>account</code></td></tr>
+    <tr><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">Database</td><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">PostgreSQL 14+ (Odoo's own requirement)</td></tr>
+    <tr><td style="padding: 8px 12px; border-bottom: 1px solid #eee;">System packages (for OCR)</td><td style="padding: 8px 12px; border-bottom: 1px solid #eee;"><code>tesseract-ocr</code> with the language data you need, and <code>poppler-utils</code></td></tr>
+    <tr><td style="padding: 8px 12px;">A Razyyn account</td><td style="padding: 8px 12px;">Free to create at <a href="https://razyyn.com" target="_blank" rel="noopener">razyyn.com</a> — the agent connects to it in one click after install</td></tr>
+  </table>
+
+  <p style="font-size: 13px; color: #777; margin-top: 10px;">
+    Python dependencies (<code>requests</code>, <code>pytesseract</code>, <code>pdf2image</code>) are fetched
+    automatically when the module installs — nothing to install by hand.
+  </p>
+
+  <h2 style="font-size: 21px; color: #111; margin-top: 36px;">License &amp; Support</h2>
+  <ul style="font-size: 14px; padding-left: 20px;">
+    <li><strong>License:</strong> LGPL-3.</li>
+    <li><strong>Publisher:</strong> <a href="https://razyyn.com" target="_blank" rel="noopener">Razyyn AI</a>.</li>
+    <li><strong>Website, plans &amp; support:</strong> <a href="https://razyyn.com" target="_blank" rel="noopener">razyyn.com</a>.</li>
+  </ul>
+
+</section>
