@@ -21,7 +21,7 @@ from datetime import timedelta
 
 from odoo import fields as odoo_fields
 
-from . import sql_dialect
+from . import live_rows, sql_dialect
 from .query_guard import (  # noqa: F401 (re-exported for the controller)
     ForbiddenQueryError,
     assert_query_is_read_only,
@@ -138,8 +138,17 @@ def rewrite_model_names(env, query: str) -> str:
 
 def validate_and_execute_query(env, sql_query: str,
                                 max_rows: int = DEFAULT_MAX_RESULT_ROWS,
-                                timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS) -> dict:
+                                timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS,
+                                include_cancelled: bool = False) -> dict:
     """Validate a SQL query for read-only safety, then execute it under limits.
+
+    DRAFT AND CANCELLED ROWS ARE REMOVED FROM EVERY TABLE THE STATEMENT READS
+        before it runs — see ``live_rows.py``. `include_cancelled` switches
+        that off, for a caller whose question is about the cancelled
+        documents themselves, and the reply records that it did. The reply
+        also names what was excluded (`live_filters`) so the caller can state
+        it, and says when the statement could not be parsed and ran as
+        written (`live_rows_enforced` False) so the caller can filter itself.
 
     WHY THERE IS NO COMPANY FILTER HERE
         An earlier revision appended a company predicate to the agent's own
@@ -184,6 +193,16 @@ def validate_and_execute_query(env, sql_query: str,
     # runs. The rewrite only ever wraps a column in COALESCE/`->>`; it adds no
     # table and no statement.
     clean_query = speak_this_database(env, clean_query)
+    # AFTER the table names are physical and the columns speak this database,
+    # BEFORE the guard — so what the guard inspects is exactly what runs. The
+    # rewrite adds a SELECT * and a predicate in a table's own columns; it
+    # adds no statement and no table.
+    live_filters: dict = {}
+    enforced = False
+    if not include_cancelled:
+        clean_query, live_filters, enforced = live_rows.exclude_dead_rows(
+            clean_query, "postgres", lambda table: _live_filter_for_table(env, table),
+        )
     assert_query_is_read_only(clean_query)  # raises ForbiddenQueryError
 
     cr = env.cr
@@ -253,7 +272,39 @@ def validate_and_execute_query(env, sql_query: str,
         # to guess, and a wrong guess either stops early (a partial figure
         # presented as a total) or asks for pages that do not exist.
         "max_rows": max_rows,
+        # WHAT WAS EXCLUDED, BY NAME. A silent exclusion is as bad as none:
+        # the caller has to be able to tell the reader "cancelled entries were
+        # left out of this", and it can only say so if it is told.
+        "live_filters": live_filters,
+        "live_rows_enforced": enforced,
+        "cancelled_included": bool(include_cancelled),
     }
+
+
+def _live_filter_for_table(env, table_name: str):
+    """Which rows of one physical table are live, for ``exclude_dead_rows``.
+
+    The same answer ``build_schema_summary`` publishes as ``posted_filter``,
+    read off the model's own ``state`` selection through ``_posting_state`` —
+    so what the schema reply says and what a read actually excludes can never
+    differ. A line model answers through its header's state, copied onto the
+    line as ``parent_state``. A table that is no model's (a junction table, a
+    CTE alias, a catalogue view) or a model with no notion of posting answers
+    None: every row of it counts.
+    """
+    model = next(
+        (env[name] for name, model_cls in env.registry.models.items()
+         if getattr(model_cls, "_table", None) == table_name
+         and not getattr(model_cls, "_abstract", False)),
+        None,
+    )
+    if model is None:
+        return None
+    posting = _posting_state(env, model._name)
+    if not posting:
+        return None
+    column, value, _values = posting
+    return f"{column} = '{value}'"
 
 
 # ─── Schema Summary ──────────────────────────────────────────────────────────
