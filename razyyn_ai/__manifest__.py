@@ -1,4 +1,4 @@
-# Copyright (c) 2026, Marwan Badr and contributors
+# Copyright (c) 2026, Razyyn AI and contributors
 # For license information, please see LICENSE
 
 {
@@ -24,7 +24,7 @@ copied file for file by tools/sync_from_frappe.py and given an Odoo to run on
 by static/src/chat/razyyn_platform.js, so both products get every improvement
 and neither can drift.
     """,
-    "author": "Marwan Badr",
+    "author": "Razyyn AI",
     "maintainer": "Razyyn AI",
     "website": "https://razyyn.com",
     "license": "LGPL-3",
