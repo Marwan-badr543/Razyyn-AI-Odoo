@@ -20,6 +20,8 @@ from typing import Any, Optional
 from odoo import fields
 from odoo.exceptions import UserError, ValidationError
 
+from .server_config import server_url
+
 _logger = logging.getLogger(__name__)
 
 #: The dedicated Odoo user the agent acts as. Named for the product, so an
@@ -47,10 +49,7 @@ _PLATFORM_TIMEOUT_SECONDS = 45
 
 
 def _server_url(env) -> str:
-    param = env["ir.config_parameter"].sudo().get_param(
-        "razyyn_ai.server_url", "http://localhost:8010"
-    )
-    return param.rstrip("/")
+    return server_url(env)
 
 
 def _public_site_url(env) -> str:

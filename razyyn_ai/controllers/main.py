@@ -166,28 +166,6 @@ class RazyynAgentApiController(http.Controller):
 
         return _ok(result)
 
-    @http.route("/agent_api/request_clarification", type="http", auth="public",
-                methods=["POST"], csrf=False)
-    def request_clarification(self, **_kwargs):
-        params = _params()
-        agent_settings, failure = _authenticated(params)
-        if failure:
-            return failure
-
-        session_id = params.get("session_id")
-        questions = params.get("questions")
-        env = _service_env()
-        try:
-            result = svc.process_clarification_request(env, session_id, questions, agent_settings)
-        except svc.MissingParameterError as exc:
-            return _error(400, f"Missing {exc.parameter_name} parameter.")
-        except svc.ResourceNotFoundError as exc:
-            return _error(404, str(exc))
-        except svc.InvalidPayloadFormatError as exc:
-            return _error(400, exc.detail)
-
-        return _ok(result)
-
     @http.route("/agent_api/upload_file", type="http", auth="public",
                 methods=["POST"], csrf=False)
     def upload_file(self, **_kwargs):

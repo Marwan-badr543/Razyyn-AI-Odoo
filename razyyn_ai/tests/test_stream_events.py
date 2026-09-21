@@ -297,3 +297,34 @@ class TheModelsThinkingIsNeverWritten(_EventsTestCase):
             lambda row: row.event == "agent_message_chunk")
         spoken = "".join(json.loads(row.payload)["chunk"] for row in chunks)
         self.assertEqual(spoken, "first second")
+
+    def test_a_managers_aside_is_stored_and_drawn_as_its_own_bubble(self):
+        session = self._session("relayed")
+        turns._relay(self.env, self.env.uid, session, _Stream(
+            _sse("aside", {"text": "Added the VAT check as step 4."})
+            + _sse("done", {"response": "Done."})
+        ))
+        written = [row.event for row in self._rows_of("relayed")]
+        self.assertIn("agent_aside", written)
+        stored = self.env["razyyn.agent.chat.message"].sudo().search(
+            [("session_id", "=", session.id), ("sender", "=", "ai")], order="id asc")
+        self.assertEqual(stored[0].content, "Added the VAT check as step 4.")
+
+    def test_a_noted_message_ends_the_turn_without_an_answer_row(self):
+        session = self._session("relayed")
+        turns._relay(self.env, self.env.uid, session, _Stream(_sse("noted", {"session_id": "relayed"})))
+        written = [row.event for row in self._rows_of("relayed")]
+        self.assertEqual(written, ["agent_message_noted"])
+        stored = self.env["razyyn.agent.chat.message"].sudo().search(
+            [("session_id", "=", session.id), ("sender", "=", "ai")])
+        self.assertFalse(stored, "a noted message stores no answer of its own")
+
+    def test_the_relay_speaks_exactly_the_servers_vocabulary(self):
+        """The events the Frappe relay handles, event for event; the ones
+        nothing has emitted since the manager rewrite are not among them."""
+        import inspect
+        import re
+
+        handled = set(re.findall(r'current_event == "([a-z_]+)"', inspect.getsource(turns._relay)))
+        self.assertEqual(handled, {"text", "reasoning", "node_start", "todo", "tool_start",
+                                   "aside", "noted", "done", "cancelled", "error"})

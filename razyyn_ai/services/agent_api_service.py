@@ -73,12 +73,6 @@ class FileTooLargeError(Exception):
         super().__init__(f"File of {size_bytes} bytes exceeds the {limit_bytes} byte limit.")
 
 
-class InvalidPayloadFormatError(Exception):
-    def __init__(self, detail: str) -> None:
-        self.detail = detail
-        super().__init__(detail)
-
-
 # ─── Authentication ──────────────────────────────────────────────────────────
 
 
@@ -879,54 +873,6 @@ def get_or_create_session(env, session_id: str, agent_settings):
         session.touch()
         return session
     return Session.create({"session_id": session_id, "agent_settings_id": agent_settings.id})
-
-
-# ─── Clarification requests ──────────────────────────────────────────────────
-
-
-def parse_questions_payload(questions_raw) -> list:
-    if isinstance(questions_raw, list):
-        return questions_raw
-    try:
-        parsed = json.loads(questions_raw)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise InvalidPayloadFormatError(f"Invalid questions format. Must be a JSON array. Error: {exc}") from exc
-    if not isinstance(parsed, list):
-        raise InvalidPayloadFormatError("questions must be a list / JSON array.")
-    return parsed
-
-
-def process_clarification_request(env, session_id: str, questions_raw, agent_settings) -> dict:
-    if not session_id:
-        raise MissingParameterError("session_id")
-    if not questions_raw:
-        raise MissingParameterError("questions")
-
-    parsed_questions = parse_questions_payload(questions_raw)
-    session = get_or_create_session(env, session_id, agent_settings)
-
-    content = json.dumps({"type": "clarification", "questions": parsed_questions}, ensure_ascii=False)
-    # `ai`, not `agent`: the sender Selection on razyyn.agent.chat.message
-    # declares human/ai/system, mirroring the Frappe app's Agent Chat History,
-    # and Odoo refuses a Selection value that is not one of them. There is no
-    # `kind` column and deliberately so — WHAT a message is travels inside its
-    # own content JSON (`{"type": "clarification", ...}`), which is how the
-    # Frappe app stores it and what the chat front-end already reads.
-    env["razyyn.agent.chat.message"].sudo().create({
-        "session_id": session.id,
-        "sender": "ai",
-        "content": content,
-    })
-
-    # Odoo's realtime channel, the counterpart of frappe.publish_realtime —
-    # notifies any UI subscribed to this session's bus channel.
-    env["bus.bus"]._sendone(
-        f"razyyn_agent_session_{session_id}",
-        "razyyn_agent_clarification_requested",
-        {"session_id": session_id, "questions": parsed_questions},
-    )
-
-    return {"success": True, "message": "Clarification request saved and broadcasted successfully."}
 
 
 # ─── Generated file upload ───────────────────────────────────────────────────
