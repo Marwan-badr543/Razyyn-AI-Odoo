@@ -363,8 +363,11 @@ class WhatIsActuallyDeclared(unittest.TestCase):
 
     def test_nothing_speculative_is_declared(self):
         # An entry for something Odoo already ships means a pip run at every
-        # install that had nothing to do.
-        self.assertEqual(len(dependencies.PYTHON_PACKAGES), 2)
+        # install that had nothing to do. Three, and each one absent from a
+        # stock Odoo: the two the reader imports, and the SQL parser that
+        # keeps cancelled rows out of every read (services/live_rows.py).
+        self.assertEqual(len(dependencies.PYTHON_PACKAGES), 3)
+        self.assertIn("sqlglot", {package.module for package in dependencies.PYTHON_PACKAGES})
 
 
 if __name__ == "__main__":

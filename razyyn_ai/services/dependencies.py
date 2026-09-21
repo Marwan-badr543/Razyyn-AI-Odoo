@@ -111,6 +111,11 @@ PYTHON_PACKAGES: tuple[Package, ...] = (
         requirement="pdf2image",
         purpose="turning the pages of a scanned PDF into pictures that can be read",
     ),
+    Package(
+        module="sqlglot",
+        requirement="sqlglot",
+        purpose="excluding draft and cancelled records from every read the agent makes",
+    ),
 )
 
 #: Detected and reported, never installed. See the module docstring.
