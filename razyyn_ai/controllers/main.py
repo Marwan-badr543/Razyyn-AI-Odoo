@@ -45,6 +45,7 @@ from odoo.http import request
 
 from ..services import agent_api_service as svc
 from ..services import agent_messaging_service as messaging
+from ..services import live_rows
 from ..services.query_guard import ForbiddenQueryError
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,13 @@ class RazyynAgentApiController(http.Controller):
 
         sql_query = params.get("sql_query")
         try:
-            result = svc.validate_and_execute_query(_service_env(), sql_query)
+            result = svc.validate_and_execute_query(
+                _service_env(), sql_query,
+                # Draft and cancelled rows are removed from every table the
+                # statement reads unless the caller asks for them by name —
+                # see services/live_rows.py.
+                include_cancelled=live_rows.read_flag(params.get("include_cancelled")),
+            )
         except svc.MissingParameterError:
             return _error(400, "Missing SQL query.")
         except ForbiddenQueryError as exc:
