@@ -274,7 +274,8 @@
 	color: var(--chat-text);
 }
 
-.agent-auth-card input {
+.agent-auth-card input,
+.agent-auth-card select {
 	width: 100%;
 	padding: 11px 14px;
 	border: 1px solid var(--chat-border);
@@ -287,10 +288,52 @@
 	transition: all 0.2s;
 }
 
-.agent-auth-card input:focus {
+.agent-auth-card select {
+	min-height: 43px;
+	padding-inline-end: 42px;
+	appearance: none;
+	-webkit-appearance: none;
+	cursor: pointer;
+	background-image:
+		linear-gradient(45deg, transparent 50%, var(--chat-text-muted) 50%),
+		linear-gradient(135deg, var(--chat-text-muted) 50%, transparent 50%);
+	background-position:
+		calc(100% - 19px) 50%,
+		calc(100% - 14px) 50%;
+	background-size: 5px 5px, 5px 5px;
+	background-repeat: no-repeat;
+}
+
+[dir="rtl"] .agent-auth-card select {
+	background-position: 19px 50%, 14px 50%;
+}
+
+.agent-auth-card select:hover:not(:disabled) {
+	border-color: var(--chat-text-muted);
+}
+
+.agent-auth-card select option {
+	background-color: var(--chat-card-bg);
+	color: var(--chat-text);
+}
+
+.agent-auth-card input:focus,
+.agent-auth-card select:focus {
 	border-color: var(--chat-primary);
 	background-color: var(--chat-card-bg);
 	box-shadow: 0 0 0 3px var(--color-accent-light);
+}
+
+.agent-auth-card select:disabled {
+	cursor: wait;
+	opacity: 0.65;
+}
+
+.agent-auth-card .auth-country-note {
+	display: block;
+	margin-top: 7px;
+	font-size: 11.5px;
+	line-height: 1.45;
 }
 
 .agent-auth-btn {

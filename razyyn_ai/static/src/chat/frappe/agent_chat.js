@@ -787,9 +787,23 @@ class FileUploadHandler {
 class ChatAttachmentsRenderer {
 
 	constructor() {
-		// Regex patterns for attachment markers (supports optional FILE:/IMAGE: prefix for robustness)
-		this.FILE_PATTERN = /\[(?:FILE:)?([^:]+):(\/(?:private|files|api)[^\]]+|https?:\/\/[^\]]+)\]/g;
-		this.IMAGE_PATTERN = /\[(?:IMAGE:)?([^:]+):(\/(?:private|files|api)[^\]]+|https?:\/\/[^\]]+)\]/g;
+		// Regex patterns for attachment markers (supports optional FILE:/IMAGE: prefix for robustness).
+		//
+		// THE URL IS ANY ROOT-RELATIVE PATH OR AN ABSOLUTE ONE. The path used to
+		// have to start with /private, /files or /api - the three prefixes
+		// Frappe serves files under - so on Odoo, where the same chat serves a
+		// file at /razyyn/chat/download_file/<id>, the marker matched nothing
+		// and the customer read "[FILE:statement.xlsx:/razyyn/chat/...]" as
+		// text in their own message instead of seeing the chip. A marker is
+		// recognised by its shape ([name:url]); which prefix a platform serves
+		// its files under is that platform's business.
+		// URLs produced by Frappe may contain the original filename as a query
+		// value. A perfectly valid filename such as "Statement (1).xlsx" then
+		// puts spaces inside the marker. Match up to the marker's closing bracket,
+		// rather than stopping at the first space and exposing the whole token as
+		// chat text.
+		this.FILE_PATTERN = /\[(?:FILE:)?([^:\]]+):(\/[^\]]+|https?:\/\/[^\]]+)\]/g;
+		this.IMAGE_PATTERN = /\[(?:IMAGE:)?([^:\]]+):(\/[^\]]+|https?:\/\/[^\]]+)\]/g;
 	}
 
 	_unescape_html_entities(str) {
@@ -824,12 +838,12 @@ class ChatAttachmentsRenderer {
 		// Extract FILE markers
 		let match;
 		while ((match = this.FILE_PATTERN.exec(unescaped_content)) !== null) {
-			files.push({ name: match[1], url: match[2] });
+			files.push({ name: match[1], url: match[2].trim() });
 		}
 
 		// Extract IMAGE markers
 		while ((match = this.IMAGE_PATTERN.exec(unescaped_content)) !== null) {
-			images.push({ name: match[1], url: match[2] });
+			images.push({ name: match[1], url: match[2].trim() });
 		}
 
 		// Remove markers from text (handles both escaped and unescaped formats)
@@ -837,8 +851,8 @@ class ChatAttachmentsRenderer {
 			.replace(this.FILE_PATTERN, '')
 			.replace(this.IMAGE_PATTERN, '');
 
-		let escaped_file_pattern = /\[(?:FILE:)?([^:]+):(&#x2F;(?:private|files|api)[^\]]+|https?:\/\/[^\]]+)\]/g;
-		let escaped_image_pattern = /\[(?:IMAGE:)?([^:]+):(&#x2F;(?:private|files|api)[^\]]+|https?:\/\/[^\]]+)\]/g;
+		let escaped_file_pattern = /\[(?:FILE:)?([^:\]]+):(&#x2F;[^\]]+|https?:\/\/[^\]]+)\]/g;
+		let escaped_image_pattern = /\[(?:IMAGE:)?([^:\]]+):(&#x2F;[^\]]+|https?:\/\/[^\]]+)\]/g;
 		clean_text = clean_text
 			.replace(escaped_file_pattern, '')
 			.replace(escaped_image_pattern, '')
