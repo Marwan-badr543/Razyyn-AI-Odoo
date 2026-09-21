@@ -76,6 +76,32 @@ URL_REWRITES = (
 #: The marked regions of agent_chat.py, in the order they are written out.
 TRANSCRIPT_BLOCKS = ("transcript-markup", "transcript-readable", "transcript-answer")
 
+#: Frappe's `_()` takes no arguments, so the shared source formats AFTER
+#: translating. Odoo's `_()` takes named arguments and pylint-odoo flags a
+#: `.format()` applied to a translated string as a translation-injection
+#: bug (the apps.odoo.com submission runs that linter). The copy is written
+#: in Odoo's idiom here, in the generator, so the fix survives every sync;
+#: a hand edit to the generated file did not. Each source form MUST be
+#: present: a Frappe edit that changes one of these lines fails the sync
+#: instead of quietly dropping the Odoo form.
+TRANSLATION_REWRITES = (
+    (
+        '\t\theadline = _("{0} (and {1} more)").format(headline, len(asked) - 1)\n',
+        '\t\t# pylint: disable=prefer-env-translation\n'
+        '\t\t# No env/self here: this is a plain function, not a model method.\n'
+        '\t\theadline = _("%(headline)s (and %(more)s more)", headline=headline, more=len(asked) - 1)\n',
+    ),
+    (
+        '\t\t\tlabel=escape(_("You answered: {0}").format(said)),\n',
+        '\t\t\tlabel=escape(_("You answered: %(said)s", said=said)),  # pylint: disable=prefer-env-translation\n',
+    ),
+    (
+        '\t\tbody = (body + "\\n\\n" if body else "") + _("Awaiting your answer")\n',
+        '\t\t# pylint: disable-next=prefer-env-translation\n'
+        '\t\tbody = (body + "\\n\\n" if body else "") + _("Awaiting your answer")\n',
+    ),
+)
+
 TRANSCRIPT_HEADER = '''\
 # Copyright (c) 2026, Marwan Badr and contributors
 # For license information, please see LICENSE
@@ -251,7 +277,21 @@ def _extract_blocks(source: str) -> str:
                 f"Odoo chat cannot render a question without this code."
             )
         out.append(found.group(1).strip("\n") + "\n")
-    return "\n\n".join(out)
+    return _in_odoos_translation_idiom("\n\n".join(out))
+
+
+def _in_odoos_translation_idiom(text: str) -> str:
+    for frappe_form, odoo_form in TRANSLATION_REWRITES:
+        if text.count(frappe_form) != 1:
+            raise SystemExit(
+                "The Frappe source no longer carries this translated line, which\n"
+                "the Odoo copy rewrites into Odoo's `_()` idiom:\n\n"
+                f"{frappe_form}\n"
+                "Update TRANSLATION_REWRITES in tools/sync_from_frappe.py to match\n"
+                "the new line -- pylint-odoo rejects `.format()` on a translated string."
+            )
+        text = text.replace(frappe_form, odoo_form)
+    return text
 
 
 def _sri(data: bytes) -> str:

@@ -1278,7 +1278,7 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 	box-shadow: 0 2px 6px var(--color-accent-shadow);
 }
 
-.agent-cancel-btn {
+.agent-stop-btn {
 	background-color: var(--chat-cancel);
 	color: var(--text-on-accent);
 	border: none;
@@ -1293,16 +1293,16 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 	flex-shrink: 0;
 }
 
-.agent-cancel-btn:hover {
+.agent-stop-btn:hover {
 	background-color: var(--chat-cancel-hover);
 	transform: scale(1.03);
 }
 
-.agent-cancel-btn:active {
+.agent-stop-btn:active {
 	transform: scale(0.97);
 }
 
-.agent-cancel-btn svg {
+.agent-stop-btn svg {
 	width: 22px;
 	height: 22px;
 	fill: currentColor;
@@ -1861,27 +1861,8 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 	opacity: 0.7;
 }
 
-/* The plan for a multi-desk "auto" run, shown before any step has one. */
-.thinking-plan-banner {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-size: 12px;
-	font-weight: 600;
-	color: var(--chat-text);
-	padding-bottom: 8px;
-	margin-bottom: 6px;
-	border-bottom: 1px dashed var(--chat-border);
-}
-
-.thinking-plan-banner i {
-	color: var(--chat-primary);
-}
-
-/* Which desk answered — most worth showing under 'auto', where nobody named
- * one themselves. Reuses the AGENT_DEFINITIONS badge_class palette already
- * used by the dropdown selector, so a desk's colour means the same thing in
- * both places. */
+/* Which desk answered. The badge palette is the one thing the desks share
+ * with the rest of the page, so a desk's colour means the same everywhere. */
 .thinking-agent-badge {
 	display: inline-flex;
 	align-items: center;
