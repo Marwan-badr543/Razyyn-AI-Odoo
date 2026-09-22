@@ -36,7 +36,7 @@ import uuid
 import requests
 import werkzeug
 
-from odoo import fields, http
+from odoo import _, fields, http
 from odoo.exceptions import AccessDenied, UserError
 from odoo.http import request
 
@@ -59,6 +59,10 @@ MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 
 REGISTER_TIMEOUT = (10, 30)
 LOGIN_TIMEOUT = (10, 30)
+#: The country list for the sign-up form. A constant the platform holds in
+#: memory, read while somebody is looking at a form, so it gives up quickly:
+#: the same server is about to be asked to create the account.
+COUNTRIES_TIMEOUT = (5, 10)
 DELETE_ACCOUNT_TIMEOUT = (10, 30)
 BANNER_TIMEOUT = (5, 10)
 
@@ -182,7 +186,7 @@ def _session(session_id: str):
 def _owned_session_or_refuse(session_id: str):
     session = _session(session_id)
     if not session:
-        raise UserError(request.env._("Chat session not found."))
+        raise UserError(_("Chat session not found."))
     return session
 
 
@@ -262,23 +266,99 @@ class RazyynChatApi(http.Controller):
             return _ok({"connected": True, "email": settings.email})
         return _ok({"connected": False, "email": None})
 
+    @http.route("/razyyn/api/get_signup_countries", type="json", auth="user")
+    def get_signup_countries(self, **_kwargs):
+        """The countries an account may be registered under, for the sign-up form.
+
+        WHY THIS MODULE KEEPS NO LIST OF ITS OWN
+            The platform refuses a country outside its own list, so a copy here
+            would eventually offer a customer a country their registration is
+            then refused for -- after they had typed a password. One list,
+            fetched. It runs before the account exists, so it carries no token;
+            the platform serves it publicly for that reason.
+
+        `suggested` is this database's own company country, which Odoo already
+        stores as an ISO code. It preselects the right answer for almost
+        everybody without deciding for anybody.
+        """
+        # REPORTED, NOT RAISED.
+        #
+        # A UserError here would put a dialog in front of somebody who has not
+        # asked for anything yet -- the card loads this while they look at it.
+        # The sign-up form shows the reason beside the country box instead and
+        # refuses to submit, which is the same refusal without the interruption.
+        try:
+            response = requests.get(
+                f"{_server_url()}/users/countries", timeout=COUNTRIES_TIMEOUT,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            _logger.warning("Razyyn AI: the country list could not be read: %s", exc)
+            return _ok({
+                "countries": [],
+                "error": _("Could not reach the Razyyn service to load the country list."),
+            })
+
+        countries = payload.get("countries") or []
+        known = {str(row.get("code") or "").upper() for row in countries}
+        suggested = (request.env.company.country_id.code or "").strip().upper()
+        return _ok({
+            "countries": countries,
+            "default": payload.get("default"),
+            "suggested": suggested if suggested in known else None,
+        })
+
     @http.route("/razyyn/api/authenticate_agent", type="json", auth="user")
     def authenticate_agent(self, mode=None, email=None, password=None,
-                           company_name=None, **_kwargs):
+                           company_name=None, country_code=None,
+                           accepted_terms=False, **_kwargs):
+        # `accepted_terms` is NAMED here rather than left to `**_kwargs`: a
+        # parameter this method does not declare is one it silently discards,
+        # and the discarded value would be the customer's agreement to the
+        # terms — refused as absent no matter what they ticked.
         email = (email or "").strip()
         if not email or not password:
-            raise UserError(request.env._("Email and password are required."))
+            raise UserError(_("Email and password are required."))
 
         if mode == "signup":
-            return _ok(self._sign_up(email, password, company_name))
+            return _ok(self._sign_up(
+                email, password, company_name, country_code, accepted_terms,
+            ))
         if mode == "login":
             return _ok(self._sign_in(email, password))
-        raise UserError(request.env._("Invalid mode specified."))
+        raise UserError(_("Invalid mode specified."))
 
-    def _sign_up(self, email, password, company_name):
+    def _sign_up(self, email, password, company_name, country_code=None,
+                 accepted_terms=False):
         company_name = (company_name or request.env.company.name or "").strip()
         if not company_name:
-            raise UserError(request.env._("Company Name is required for registration."))
+            raise UserError(_("Company Name is required for registration."))
+
+        # REFUSED HERE RATHER THAN DEFAULTED.
+        #
+        # The platform has a default (Egypt) and would accept the registration
+        # without this field. That default is what the sign-up form's country
+        # box exists to stop relying on: a customer outside Egypt whose form
+        # omitted it was given Egyptian law to be audited against, and neither
+        # side reported anything wrong. An empty box is a question that was not
+        # answered, not an answer.
+        country = str(country_code or "").strip().upper()
+        if len(country) != 2 or not country.isalpha():
+            raise UserError(_("Please choose the country your books are kept under."))
+
+        # AGREED TO, NOT ASSUMED.
+        #
+        # The sign-up form refuses to submit with the box unticked, which is
+        # where a customer sees this. It is checked again here because the
+        # browser is not the gate: this route is reachable by anyone signed
+        # into this Odoo, and a call that never drew a form would otherwise
+        # create an account that agreed to nothing. The platform refuses it a
+        # third time, at the row.
+        accepted = _as_bool(accepted_terms)
+        if not accepted:
+            raise UserError(_("Please accept the Terms of Use to create an account."))
+
         # `_settings`, not `_mine`: this asks whether a record for THIS address
         # already exists, and the fallback would answer yes about a different
         # one and refuse a legitimate sign-up.
@@ -290,7 +370,7 @@ class RazyynChatApi(http.Controller):
         # failed registration. It is reused instead, with a fresh key.
         existing = _settings(email)
         if existing and (existing.sudo().access_token or existing.erp_connection_id):
-            raise UserError(request.env._("A connection already exists for %(email)s.", email=email))
+            raise UserError(_("A connection already exists for %(email)s.", email=email))
 
         # The key is minted BEFORE the account, because registration hands it to
         # the platform: it is how the agent gets back in to read this Odoo.
@@ -317,6 +397,11 @@ class RazyynChatApi(http.Controller):
                     "company_url": base_url,
                     "api_key": api_key,
                     "erp_code": "ODOO",
+                    "country_code": country,
+                    # Recorded by the platform, not here: the account outlives
+                    # this Odoo database, and so must the record of what it
+                    # agreed to.
+                    "accepted_terms": accepted,
                 },
                 timeout=REGISTER_TIMEOUT,
             )
@@ -326,7 +411,7 @@ class RazyynChatApi(http.Controller):
             _discard(settings)
             _logger.warning("Razyyn AI: registration could not be sent: %s", exc)
             raise UserError(
-                request.env._("Could not reach the Razyyn service. Please make sure it is running.")
+                _("Could not reach the Razyyn service. Please make sure it is running.")
             ) from exc
 
         if response.status_code != 201:
@@ -361,7 +446,7 @@ class RazyynChatApi(http.Controller):
         except requests.exceptions.RequestException as exc:
             _logger.warning("Razyyn AI: sign-in could not be sent: %s", exc)
             raise UserError(
-                request.env._("Could not reach the Razyyn service. Please make sure it is running.")
+                _("Could not reach the Razyyn service. Please make sure it is running.")
             ) from exc
         if response.status_code != 200:
             raise UserError(self._detail(
@@ -371,18 +456,18 @@ class RazyynChatApi(http.Controller):
             body = response.json()
         except (ValueError, TypeError) as exc:
             raise UserError(
-                request.env._("The Razyyn service returned an invalid sign-in response. Please try again.")
+                _("The Razyyn service returned an invalid sign-in response. Please try again.")
             ) from exc
 
         access_token = body.get("access_token")
         refresh_token = body.get("refresh_token")
         if not isinstance(access_token, str) or not access_token.strip():
             raise UserError(
-                request.env._("The Razyyn service did not return an access token. Please try again.")
+                _("The Razyyn service did not return an access token. Please try again.")
             )
         if not isinstance(refresh_token, str) or not refresh_token.strip():
             raise UserError(
-                request.env._("The Razyyn service did not return a refresh token. Please try again.")
+                _("The Razyyn service did not return a refresh token. Please try again.")
             )
         return {
             "access_token": access_token,
@@ -418,9 +503,9 @@ class RazyynChatApi(http.Controller):
                 )
             except requests.exceptions.RequestException as exc:
                 _logger.warning("Razyyn AI: account deletion could not be sent: %s", exc)
-                raise UserError(request.env._("Could not reach the Razyyn service. Please try again.")) from exc
+                raise UserError(_("Could not reach the Razyyn service. Please try again.")) from exc
             if response.status_code not in (200, 204, 404):
-                raise UserError(request.env._("The agent account could not be deleted. Please try again."))
+                raise UserError(_("The agent account could not be deleted. Please try again."))
 
         settings.unlink()
         return _ok({"success": True})
@@ -465,12 +550,12 @@ class RazyynChatApi(http.Controller):
         """
         wanted = (language or "").strip()[:2].lower()
         if not wanted:
-            raise UserError(request.env._("No language was chosen."))
+            raise UserError(_("No language was chosen."))
 
         installed = request.env["res.lang"].sudo().search([("active", "=", True)])
         match = next((lang for lang in installed if lang.code.lower().startswith(wanted)), None)
         if not match:
-            raise UserError(request.env._(
+            raise UserError(_(
                 "That language is not installed in Odoo yet. An administrator can "
                 "add it under Settings -> Translations -> Languages."
             ))
@@ -489,18 +574,18 @@ class RazyynChatApi(http.Controller):
     @http.route("/razyyn/api/create_chat_with_id", type="json", auth="user")
     def create_chat_with_id(self, session_id=None, title=None, **_kwargs):
         if not session_id:
-            raise UserError(request.env._("Session ID is required."))
+            raise UserError(_("Session ID is required."))
         # The client picks this identifier, so it must look like one the client
         # generated rather than an arbitrary string that could collide with, or
         # be mistaken for, another customer's session key.
         try:
             uuid.UUID(str(session_id))
         except (ValueError, AttributeError, TypeError):
-            raise UserError(request.env._("Invalid session identifier."))
+            raise UserError(_("Invalid session identifier."))
         if request.env["razyyn.agent.chat.session"].sudo().search_count(
             [("session_id", "=", session_id)]
         ):
-            raise UserError(request.env._("Chat session already exists."))
+            raise UserError(_("Chat session already exists."))
 
         session = request.env["razyyn.agent.chat.session"].sudo().create({
             "session_id": session_id,
@@ -513,7 +598,7 @@ class RazyynChatApi(http.Controller):
     @http.route("/razyyn/api/update_chat_title", type="json", auth="user")
     def update_chat_title(self, session_id=None, title=None, **_kwargs):
         if not title:
-            raise UserError(request.env._("Session ID and Title are required."))
+            raise UserError(_("Session ID and Title are required."))
         session = _owned_session_or_refuse(session_id)
         session.write({"title": title, "last_update": fields.Datetime.now()})
         return _ok(_row(session))
@@ -569,7 +654,7 @@ class RazyynChatApi(http.Controller):
 
         settings = _mine(agent_email)
         if not settings or not settings.access_token:
-            raise UserError(request.env._("Not authenticated with Razyyn."))
+            raise UserError(_("Not authenticated with Razyyn."))
 
         previous = request.env["razyyn.agent.chat.message"].sudo().search(
             [("session_id", "=", session.id), ("sender", "=", "ai")], order="id desc", limit=1
@@ -677,19 +762,19 @@ class RazyynChatApi(http.Controller):
         """
         session = _owned_session_or_refuse(session_id)
         if not message_name:
-            raise UserError(request.env._("Message ID is required."))
+            raise UserError(_("Message ID is required."))
         if not (message or "").strip():
-            raise UserError(request.env._("Message cannot be empty."))
+            raise UserError(_("Message cannot be empty."))
 
         row = request.env["razyyn.agent.chat.message"].sudo().browse(
             int(message_name) if str(message_name).isdigit() else 0
         ).exists()
         if not row or row.session_id.id != session.id:
-            raise UserError(request.env._("Message not found in this chat."))
+            raise UserError(_("Message not found in this chat."))
         if row.sender != "human":
-            raise UserError(request.env._("Only your own messages can be edited."))
+            raise UserError(_("Only your own messages can be edited."))
         if row.content == "Approve" or (row.content or "").startswith("Clarification Response:"):
-            raise UserError(request.env._("This message can't be edited."))
+            raise UserError(_("This message can't be edited."))
 
         # Stop first: a run still answering the discarded branch must not race
         # the fresh one for the same conversation.
@@ -731,7 +816,7 @@ class RazyynChatApi(http.Controller):
 
         settings = _mine(agent_email)
         if not settings:
-            raise UserError(request.env._("Not authenticated with Razyyn."))
+            raise UserError(_("Not authenticated with Razyyn."))
 
         def send(headers):
             headers = dict(headers, **{"Content-Type": "application/json"})

@@ -139,7 +139,7 @@ def rewrite_model_names(env, query: str) -> str:
 def validate_and_execute_query(env, sql_query: str,
                                 max_rows: int = DEFAULT_MAX_RESULT_ROWS,
                                 timeout_seconds: int = DEFAULT_QUERY_TIMEOUT_SECONDS,
-                                include_cancelled: bool = False) -> dict:
+                                company_id=None, include_cancelled: bool = False) -> dict:
     """Validate a SQL query for read-only safety, then execute it under limits.
 
     DRAFT AND CANCELLED ROWS ARE REMOVED FROM EVERY TABLE THE STATEMENT READS
@@ -192,7 +192,10 @@ def validate_and_execute_query(env, sql_query: str,
     # Before the guard, never after, so what the guard inspects is exactly what
     # runs. The rewrite only ever wraps a column in COALESCE/`->>`; it adds no
     # table and no statement.
-    clean_query = speak_this_database(env, clean_query)
+    # `company_id` is the connection's company: the DEFAULT a bare read of a
+    # per-company column is resolved to. The agent names another company
+    # explicitly (`code_store->>'2'`) and that is left as written.
+    clean_query = speak_this_database(env, clean_query, company_id=company_id)
     # AFTER the table names are physical and the columns speak this database,
     # BEFORE the guard — so what the guard inspects is exactly what runs. The
     # rewrite adds a SELECT * and a predicate in a table's own columns; it
@@ -339,7 +342,38 @@ def _site_languages(env) -> tuple:
     return (site,) if site == "en_US" else (site, "en_US")
 
 
-def speak_this_database(env, query: str) -> str:
+def _model_of_table(env, table_name: str):
+    """The model whose rows live in `table_name`, or None for a junction table."""
+    for model_name, model_cls in env.registry.models.items():
+        if getattr(model_cls, "_table", None) == table_name and not getattr(model_cls, "_abstract", False):
+            return env[model_name]
+    return None
+
+
+def _column_kinds(env, table_name: str) -> dict:
+    """Column name -> the type the REWRITER needs, which is finer than Postgres's.
+
+    Postgres says `jsonb` for two different things: a translated field, keyed
+    by language, and a company-dependent field that newer Odoo keeps on the
+    table keyed by company id (Odoo 18's `account_account.code_store`). The
+    rewriter reads one through the site's languages and the other through the
+    connection's company; told only "jsonb" it applied `->>'en_US'` to both,
+    and every account lookup by code on Odoo 18 ran and returned nothing.
+    """
+    kinds = _column_types(env.cr, table_name)
+    if not any(kind == "jsonb" for kind in kinds.values()):
+        return kinds
+    model = _model_of_table(env, table_name)
+    if model is None:
+        return kinds
+    for column, kind in list(kinds.items()):
+        field = model._fields.get(column)
+        if kind == "jsonb" and getattr(field, "company_dependent", False):
+            kinds[column] = sql_dialect.JSONB_COMPANY
+    return kinds
+
+
+def speak_this_database(env, query: str, company_id=None) -> str:
     """Rewrite the agent's SQL into the dialect this Odoo actually stores.
 
     See services/sql_dialect.py for what it does and why doing it is safe. In
@@ -351,8 +385,9 @@ def speak_this_database(env, query: str) -> str:
     try:
         return sql_dialect.rewrite(
             query,
-            lambda table: _column_types(env.cr, table),
+            lambda table: _column_kinds(env, table),
             _site_languages(env),
+            company_id=company_id,
         )
     except Exception as exc:
         # A query this cannot read is a query it must hand back untouched. The
@@ -405,6 +440,16 @@ def _explain(env, query: str, exc: Exception) -> str:
     and a customer's log showed it guessing eight times in one session. The
     columns the table really has are one lookup away, and naming them turns a
     retry into a correction.
+
+    THE CORRECTION LEADS AND THE DATABASE'S OWN WORDS TRAIL IT. The agent's
+    HTTP client caps an upstream error body at 300 characters
+    (`_MAX_UPSTREAM_ERROR_CHARS` in `agent/tools/tools.py`) — a deliberate
+    bound on untrusted text from a host this platform was merely pointed at.
+    PostgreSQL's sentence for a missing column arrives with the offending LINE
+    and a caret under it, which is most of that budget, so with the driver in
+    front the clip landed on the part that was added and kept the part that
+    was already useless. A clip now costs the driver's wording, which is in
+    this server's log either way. Same rule as the ERPNext app's.
     """
     message = str(exc)
     missing = re.search(r'column "?([A-Za-z_][\w.]*)"? does not exist', message)
@@ -412,7 +457,7 @@ def _explain(env, query: str, exc: Exception) -> str:
         return message
 
     column = missing.group(1).split(".")[-1]
-    lines = [message.strip()]
+    lines: list = []
 
     explained = False
     for prefix, advice in _NOT_A_COLUMN_HINTS:
@@ -442,6 +487,7 @@ def _explain(env, query: str, exc: Exception) -> str:
     except Exception as exc:
         _logger.debug("Razyyn AI: could not build a 'did you mean' hint: %s", exc)
 
+    lines.append(f"Database said: {message.strip()}")
     return "\n".join(lines)
 
 
@@ -456,18 +502,25 @@ def _posting_state(env, model_name: str):
     docstatus on ERPNext.
     """
     model = env[model_name]
-    field = model._fields.get("state")
-    if field is None or field.type != "selection":
-        return None
-
-    try:
-        values = [value for value, _label in field._description_selection(env)]
-    except Exception:
-        return None
-
-    for candidate in _POSTED_STATE_VALUES:
-        if candidate in values:
-            return "state", candidate, values
+    # A LINE MODEL SAYS "POSTED" THROUGH ITS HEADER'S STATE, WHICH ODOO COPIES
+    # ONTO THE LINE. `account.move.line` has no `state`; it has `parent_state`,
+    # a stored related field on `move_id.state`, and every draft entry's lines
+    # sit in that table beside the posted ones. Answering "no posting state"
+    # for it told the agent that every journal item counts - and a bank
+    # ledger was totalled with its drafts in - or sent it looking for the
+    # header's state through a subquery. The column is asked for by the two
+    # names Odoo uses for it, the model's own first.
+    for column_name in ("state", "parent_state"):
+        field = model._fields.get(column_name)
+        if field is None or field.type != "selection" or not getattr(field, "store", True):
+            continue
+        try:
+            values = [value for value, _label in field._description_selection(env)]
+        except Exception:
+            continue
+        for candidate in _POSTED_STATE_VALUES:
+            if candidate in values:
+                return column_name, candidate, values
     return None
 
 
@@ -816,6 +869,29 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
             elsewhere = _where_a_related_field_lives(env, model_name, field.name, declared)
             if elsewhere:
                 joins.append(elsewhere)
+                continue
+            # A FIELD WHOSE STORED TWIN IS `<name>_store`. Odoo 18 keeps an
+            # account's `code` per company: `code` itself is computed and
+            # never a column, and the value lives in `code_store`, a JSON
+            # column keyed by company id. Omitted in silence, the agent wrote
+            # `WHERE code = '101001'` against a column that does not exist,
+            # was told so, and had no way to learn where the code went.
+            stored_twin = f"{field.name}_store"
+            if stored_twin in real_columns:
+                twin = env[model_name]._fields.get(stored_twin)
+                if getattr(twin, "company_dependent", False) or column_types.get(stored_twin) == "jsonb":
+                    joins.append(
+                        f"{field.name}: not a column here - its value is kept per "
+                        f"company in {stored_twin}, a JSON column keyed by COMPANY "
+                        f"ID; in SQL read or compare it as "
+                        f"{stored_twin}->>'<the company id>' (e.g. WHERE "
+                        f"{stored_twin}->>'1' = '101001')"
+                    )
+                else:
+                    joins.append(
+                        f"{field.name}: not a column here - its value is kept in "
+                        f"the column {stored_twin}; select or compare that instead"
+                    )
             continue
 
         if is_denied_column(field.name):

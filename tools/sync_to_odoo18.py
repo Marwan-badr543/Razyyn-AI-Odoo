@@ -70,8 +70,16 @@ DEFAULT_TARGET = pathlib.Path(
 #: it is written for the customer, it names both ports, and a copy that
 #: says something the other version no longer does is a defect like any
 #: other. Nothing in it is version-specific, so it is copied unchanged.
+#: `.pylintrc` is here because it is the rules the COPIED CODE is written to.
+#: The 18 tree kept its own by hand, and the two fell out of step the moment
+#: the 17 source stopped using `self.env._()` — an idiom that does not exist
+#: before Odoo 18 and crashed every error path that reached it. The generated
+#: code then used `_()` while the generated tree's linter still demanded
+#: `env._()`, so the only tree that could lint clean was the one whose code was
+#: broken. A linter config that disagrees with the code it lints is drift like
+#: any other, and this is the file that says so.
 VERBATIM = ("tests", "requirements.txt", "README.md",
-            "TESTING_THE_CREATE_DESK.md")
+            "TESTING_THE_CREATE_DESK.md", ".pylintrc")
 
 #: The README is generated too, with a fourth rule applied to two lines of it.
 #: It was drifting the worst of anything here -- the Odoo 18 copy still

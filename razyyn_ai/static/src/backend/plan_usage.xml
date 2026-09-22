@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="razyyn_ai.PlanUsage">
+        <div class="razyyn_usage">
+
+            <div t-if="state.loading" class="razyyn_usage_muted">
+                Reading your plan usage...
+            </div>
+
+            <t t-else="">
+                <div class="razyyn_usage_head">
+                    <h4>
+                        Plan usage
+                        <span t-attf-class="razyyn_usage_plan razyyn_usage_plan_{{ state.plan }}"
+                              t-esc="state.plan"/>
+                    </h4>
+                    <button class="btn btn-link razyyn_usage_refresh"
+                            t-on-click="refresh">Refresh</button>
+                </div>
+
+                <!-- THE FIGURE, AND THEN THE BAR. In that order deliberately: the
+                     number is what the customer came for and the bar is how they
+                     read it at a glance. -->
+                <div class="razyyn_usage_row">
+                    <div class="razyyn_usage_labels">
+                        <span>This month's budget</span>
+                        <span t-attf-class="razyyn_usage_figure razyyn_usage_{{ tone }}">
+                            <t t-if="state.known"><t t-esc="state.percentage"/>%</t>
+                            <t t-else="">—</t>
+                        </span>
+                    </div>
+                    <div class="razyyn_usage_track">
+                        <div t-attf-class="razyyn_usage_fill razyyn_usage_fill_{{ tone }}"
+                             t-attf-style="width: {{ state.known and width or 0 }}%"/>
+                    </div>
+                    <small t-if="state.known">30-day billing cycle usage</small>
+                    <!-- Said quietly, with the way out of it, rather than as an
+                         error about the customer's balance. -->
+                    <small t-else="" class="razyyn_usage_unreadable">
+                        <t t-esc="state.error"/>
+                    </small>
+                </div>
+
+                <!-- WHERE TO GO WHEN THE BAR IS FULL.
+                     A customer reading "94%" has one question, and until now
+                     nothing in the ERP answered it: the plans are on the website
+                     and the website was linked from nowhere, so the next thing
+                     that happened was a refused request with no warning.
+                     rel="noopener noreferrer" is not optional on a new tab:
+                     without it the opened page gets a handle on this desk
+                     through window.opener. -->
+                <div class="razyyn_usage_upgrade">
+                    <span>Need a larger monthly budget?</span>
+                    <a class="btn btn-primary btn-sm"
+                       t-att-href="pricingUrl"
+                       target="_blank" rel="noopener noreferrer">Upgrade plan</a>
+                </div>
+            </t>
+        </div>
+    </t>
+
+</templates>

@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 from typing import Optional
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
+
+_logger = logging.getLogger(__name__)
 
 _HASH_ITERATIONS = 210_000  # OWASP PBKDF2-SHA256 floor
 
@@ -83,6 +86,25 @@ class AgentSettings(models.Model):
     def _compute_company_knowledge(self):
         for record in self:
             record.company_knowledge = False
+
+    #: THE USAGE BAR NEEDS A FIELD FOR THE SAME REASON THE KNOWLEDGE CARD DOES.
+    #:
+    #: Holds nothing and is never read. The figure belongs to the platform: it
+    #: changes with every request the agent answers, on any of the customer's
+    #: devices, and it is the basis of a bill. A stored copy here would be a
+    #: second answer to the same question, stale by however long ago it was
+    #: written -- on the one card whose whole job is to warn the customer before
+    #: their next request is refused.
+    plan_usage = fields.Char(
+        string="Plan Usage", store=False, readonly=True,
+        compute="_compute_plan_usage",
+        help="How much of this month's plan budget this account has spent. Read "
+             "live from Razyyn AI, never stored in this database.",
+    )
+
+    def _compute_plan_usage(self):
+        for record in self:
+            record.plan_usage = False
     erp_connection_id = fields.Char(
         string="ERP Connection ID",
         help="Connection UUID registered with the platform.",
@@ -174,7 +196,7 @@ class AgentSettings(models.Model):
             salt = bytes.fromhex(candidate.api_key_salt)
             computed = _hash_api_key(api_key, salt)
             if hmac.compare_digest(computed, candidate.api_key_hash):
-                candidate.write({"last_used": fields.Datetime.now()})
+                candidate._touch_last_used()
                 return candidate
             return None
 
@@ -196,11 +218,38 @@ class AgentSettings(models.Model):
                 return candidate
         return None
 
+    #: How stale `last_used` may be before an authentication writes it again.
+    _LAST_USED_GRANULARITY_SECONDS = 60
+
+    def _touch_last_used(self) -> None:
+        """Record that this key was used - without ever failing the request.
+
+        WHY THIS IS NOT A PLAIN WRITE. Every agent call authenticates, and the
+        reconciliation desk issues several calls at once. Each request is its
+        own REPEATABLE READ transaction, and two of them updating the same
+        `last_used` at the same moment left one with "could not serialize
+        access due to concurrent update" - an HTTP 500 on a perfectly good
+        read-only SELECT, which the agent read as its query being wrong.
+
+        So the stamp is coarse (once a minute is all anyone reads it for),
+        and it is written inside a savepoint whose failure is swallowed: the
+        request that lost the race carries on with the key it already proved.
+        """
+        self.ensure_one()
+        now = fields.Datetime.now()
+        if self.last_used and (now - self.last_used).total_seconds() < self._LAST_USED_GRANULARITY_SECONDS:
+            return
+        try:
+            with self.env.cr.savepoint():
+                self.write({"last_used": now})
+        except Exception as exc:  # pylint: disable=broad-except
+            _logger.debug("Razyyn AI: last_used not stamped on %s: %s", self.id, exc)
+
     @api.constrains("company_id")
     def _check_company_present(self):
         for record in self:
             if not record.company_id:
-                raise ValidationError(self.env._("An agent connection must belong to a company."))
+                raise ValidationError(_("An agent connection must belong to a company."))
 
     # NO `name` ALIAS, AND NO `allow_write_operations`/`last_synced_at`/
     # `last_error`/`agent_user_id` EITHER.

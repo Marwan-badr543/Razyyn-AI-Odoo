@@ -123,6 +123,60 @@ class TestFilesystemReach(unittest.TestCase):
         self.assertTrue(refused("COPY (SELECT 1) TO PROGRAM 'cat /etc/passwd'"))
 
 
+class TestCartesianProducts(unittest.TestCase):
+    """A FROM list the query never relates is refused before the database
+    sees it. Measured live before this existed: Odoo 18 ran the three-way
+    product below for ten seconds and answered 304,821,217; Odoo 17 held its
+    database for thirty seconds until the statement timeout killed it."""
+
+    def test_a_comma_joined_from_list_with_no_where_is_refused(self):
+        self.assertTrue(refused(
+            "SELECT COUNT(*) FROM account_move_line a, account_move_line b, "
+            "account_move_line c"
+        ))
+
+    def test_an_explicit_cross_join_is_refused(self):
+        self.assertTrue(refused("SELECT * FROM account_move a CROSS JOIN account_move b"))
+
+    def test_a_product_inside_a_subquery_or_a_cte_is_refused(self):
+        self.assertTrue(refused(
+            "SELECT * FROM account_move WHERE id IN "
+            "(SELECT a.move_id FROM account_move_line a, account_move_line b)"
+        ))
+        self.assertTrue(refused(
+            "WITH x AS (SELECT id FROM account_move) SELECT COUNT(*) FROM x, x y"
+        ))
+
+    def test_the_refusal_says_what_to_write_instead(self):
+        with self.assertRaises(ForbiddenQueryError) as caught:
+            assert_query_is_read_only("SELECT * FROM account_move a, account_move_line b")
+        self.assertIn("JOIN ... ON", caught.exception.reason)
+
+    def test_a_comma_join_with_a_where_clause_is_allowed(self):
+        self.assertFalse(refused(
+            "SELECT m.name, l.debit FROM account_move m, account_move_line l "
+            "WHERE l.move_id = m.id"
+        ))
+
+    def test_an_explicit_join_on_is_allowed(self):
+        self.assertFalse(refused(
+            "SELECT m.name, l.debit FROM account_move m "
+            "JOIN account_move_line l ON l.move_id = m.id "
+            "LEFT JOIN res_partner p ON p.id = m.partner_id"
+        ))
+
+    def test_commas_inside_parentheses_are_not_tables(self):
+        self.assertFalse(refused(
+            "SELECT EXTRACT(YEAR FROM date), COUNT(*) FROM account_move GROUP BY 1"
+        ))
+        self.assertFalse(refused(
+            "SELECT * FROM account_move m JOIN account_move_line l USING (company_id, id)"
+        ))
+        self.assertFalse(refused(
+            "SELECT * FROM account_move WHERE state IN ('posted', 'draft')"
+        ))
+
+
 class TestFalsePositiveTraps(unittest.TestCase):
     """Cases that must be ALLOWED. A guard that refuses these is too strict —
     the agent cannot answer, blames the ERP, and the accountant is told their

@@ -54,6 +54,7 @@
 		"get_chats",
 		"get_connection_status",
 		"get_run_state",
+		"get_signup_countries",
 		"get_turn_result",
 		"get_upload_rules",
 		"get_user_usage",

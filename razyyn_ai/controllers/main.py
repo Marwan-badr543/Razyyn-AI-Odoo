@@ -136,6 +136,7 @@ class RazyynAgentApiController(http.Controller):
         try:
             result = svc.validate_and_execute_query(
                 _service_env(), sql_query,
+                company_id=agent_settings.company_id.id if agent_settings.company_id else None,
                 # Draft and cancelled rows are removed from every table the
                 # statement reads unless the caller asks for them by name —
                 # see services/live_rows.py.

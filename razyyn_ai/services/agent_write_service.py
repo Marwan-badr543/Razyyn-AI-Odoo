@@ -41,6 +41,7 @@ import logging
 from typing import Any, Mapping, Optional, Sequence
 
 from odoo import fields as odoo_fields
+from odoo.exceptions import UserError, ValidationError
 
 from .link_match import pick_link_match, spellings_of
 from .write_guard import (
@@ -279,6 +280,24 @@ def _readable(exc: Exception) -> str:
     args = getattr(exc, "args", None)
     text = str(args[0] if args else exc).strip()
     return " ".join(text.split())[:400] or "This document was refused."
+
+
+def _could_not_process(doctype: str) -> str:
+    """What the customer reads when their system CRASHED on a document.
+
+    Every other refusal this gateway gives is a sentence the system wrote for
+    a person. An exception from outside the user-facing family is not one: its
+    text is Python talking to a programmer, and handing it over tells the
+    customer that the accounting reason their document was refused was an
+    "unsupported operand type". So it names the document type and nothing
+    else, while the class, the message and the traceback go where the operator
+    will look for them.
+    """
+    named = (doctype or "").strip() or "document"
+    return (
+        f"Your system could not process this {named}. The details have been "
+        f"saved to its log for your administrator."
+    )
 
 
 # ─── get_document_spec ───────────────────────────────────────────────────────
@@ -826,8 +845,6 @@ def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict
         time. The real write still enforces everything, so nothing unsafe
         passes because of this.
     """
-    from odoo.exceptions import UserError, ValidationError
-
     try:
         record = env[doctype].sudo().new(_odoo_values(env, doctype, values))
     except (ValidationError, UserError) as exc:
@@ -1553,14 +1570,38 @@ def write_documents_batch(
                                    error_code=exc.code, error_message=exc.message))
             failed.add(index)
             continue
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Agent %s failed on %s: %s", action, doctype, exc)
+        except (UserError, ValidationError) as exc:
+            # THIS SYSTEM'S OWN REFUSAL, in the sentence it wrote for a person.
+            # `UserError` and `ValidationError` are what a model raises when it
+            # means "somebody got this wrong", so the message is the accounting
+            # reason and belongs in front of the customer unchanged.
+            logger.info("Agent %s refused on %s: %s", action, doctype, exc)
             _record_log(env, idempotency_key=key, action=action, doctype=doctype,
                         payload=payload, session_id=session_id,
-                        status="failed", error_details=str(exc))
+                        status="rejected", rejection_reason=_readable(exc))
             results.append(_result(entry, ordinal, "REJECTED",
                                    error_code="WRITE_REJECTED",
                                    error_message=_readable(exc)))
+            failed.add(index)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # A CRASH, NOT A REFUSAL, and the two readers are told different
+            # things. Anything outside the user-facing family is the system
+            # failing on this document rather than judging it, and its text is
+            # Python talking to a programmer — the customer used to read
+            # "unsupported operand type(s) for -: 'NoneType' and 'float'" as
+            # the accounting reason their invoice was refused. They get a plain
+            # sentence naming the document type; the operator gets the
+            # exception's class and message on the log row and the whole
+            # traceback in the server log.
+            logger.exception("Agent %s failed on %s: %s", action, doctype, exc)
+            _record_log(env, idempotency_key=key, action=action, doctype=doctype,
+                        payload=payload, session_id=session_id,
+                        status="failed",
+                        error_details=f"{type(exc).__name__}: {exc}")
+            results.append(_result(entry, ordinal, "REJECTED",
+                                   error_code="WRITE_REJECTED",
+                                   error_message=_could_not_process(doctype)))
             failed.add(index)
             continue
 

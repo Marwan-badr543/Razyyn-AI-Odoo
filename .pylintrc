@@ -15,13 +15,35 @@ readme-template-url=https://github.com/OCA/maintainer-tools/blob/master/template
 #   manifest-deprecated-key  — OCA's newer style drops manifest "description"
 #                               in favor of README.rst; we keep it as the short
 #                               blurb Odoo's own backend Apps list renders.
-disable=manifest-required-author,missing-readme,manifest-deprecated-key
+#
+# AND ONE THAT IS NOT A CONVENTION AT ALL:
+#   prefer-env-translation   — this check wants `self.env._("...")` instead of
+#                               `_("...")`. `Environment._` DOES NOT EXIST
+#                               BEFORE ODOO 18, and Odoo 17 is the series this
+#                               module is written for (Odoo 18's tree is
+#                               generated from it by tools/sync_to_odoo18.py).
+#                               Following the check cost a real outage: opening
+#                               the Write Governance Policy screen raised
+#                               "'Environment' object has no attribute '_'"
+#                               from action_open_policy, and the same idiom sat
+#                               on ~40 more error paths across six files,
+#                               every one of them a crash waiting for the
+#                               condition that reaches it.
+#                               `from odoo import _` is correct on BOTH series:
+#                               17 and 18 each export it from
+#                               odoo.tools.translate, and 17's `_` takes the
+#                               same %(name)s keyword arguments, so one
+#                               spelling serves both trees — which is exactly
+#                               what a generated second tree requires.
+disable=manifest-required-author,missing-readme,manifest-deprecated-key,
+        prefer-env-translation
 
 # Usage: pylint --rcfile=.pylintrc -d all -e odoolint razyyn_ai
 # NOTE: the disables above must be passed again on the command line AFTER
 # `-e odoolint`, e.g.:
 #   pylint --rcfile=.pylintrc -d all -e odoolint \
-#       -d manifest-required-author,missing-readme,manifest-deprecated-key razyyn_ai
+#       -d manifest-required-author,missing-readme,manifest-deprecated-key,\
+#          prefer-env-translation razyyn_ai
 # `-e odoolint` is a category-enable that otherwise re-enables everything in
 # this file's disable list, since pylint applies message-control args in the
 # order given and category enables aren't overridden by an earlier specific
