@@ -336,6 +336,44 @@
 	line-height: 1.45;
 }
 
+/* The Terms of Use tick box.
+ *
+ * The card's `input` rule stretches every field to the full width, which turns
+ * a checkbox into a bar, so this one takes its own size back. The label holds
+ * the box and the sentence together: clicking any of the words ticks it, which
+ * is how a person expects a consent box to behave. */
+.agent-auth-card .agent-auth-terms label {
+	display: flex;
+	align-items: flex-start;
+	gap: 9px;
+	margin-bottom: 0;
+	font-weight: 400;
+	font-size: 12.5px;
+	line-height: 1.5;
+	cursor: pointer;
+	color: var(--chat-text-muted);
+}
+
+.agent-auth-card .agent-auth-terms input[type="checkbox"] {
+	width: 16px;
+	min-width: 16px;
+	height: 16px;
+	margin: 1px 0 0;
+	padding: 0;
+	accent-color: var(--chat-primary);
+	cursor: pointer;
+}
+
+.agent-auth-card .agent-auth-terms a {
+	color: var(--chat-primary);
+	font-weight: 600;
+	text-decoration: underline;
+}
+
+.agent-auth-card .agent-auth-terms a:hover {
+	color: var(--chat-primary-hover);
+}
+
 .agent-auth-btn {
 	width: 100%;
 	padding: 13px;
@@ -777,6 +815,27 @@
 	line-height: var(--line-height-body);
 }
 
+/* Text reads in its own direction. The agent answers in whatever language the
+   customer writes, and an Arabic, Hebrew, Persian or Urdu answer inside an
+   English page must start at the right, with the Latin words inside it — an
+   account name, an item code, "IFRS" — still running left-to-right. The
+   markdown renderer stamps dir="auto" on every block it emits; this covers
+   the text that reaches the page without it: a bubble being typed out, a step
+   title, a question and its offered answers, and what the customer types. */
+.agent-msg-bubble,
+.agent-msg-text-content,
+.agent-todo-title,
+.agent-todo-detail,
+.clarification-popup-title,
+.clarification-row-option,
+.clarification-option-pill,
+.agent-question summary,
+.agent-textarea,
+.agent-msg-edit-textarea {
+	unicode-bidi: plaintext;
+	text-align: start;
+}
+
 /* User Bubble: Right-aligned, quiet slate container */
 .agent-msg-row.user .agent-msg-bubble, .agent-msg-row.human .agent-msg-bubble {
 	background-color: var(--bg-raised);
@@ -929,7 +988,7 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 .agent-msg-bubble ol {
 	margin-top: 0;
 	margin-bottom: 10px;
-	padding-left: 20px;
+	padding-inline-start: 20px;
 	line-height: 1.5;
 }
 
@@ -941,9 +1000,10 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 .agent-msg-bubble blockquote {
 	margin: 12px 0;
 	padding: 8px 14px;
-	border-left: 4px solid var(--color-accent);
+	border-inline-start: 4px solid var(--color-accent);
 	background-color: var(--color-accent-glow);
-	border-radius: 0 8px 8px 0;
+	border-start-end-radius: 8px;
+	border-end-end-radius: 8px;
 	color: var(--text-muted);
 	font-style: italic;
 }
@@ -1067,7 +1127,7 @@ body[data-theme="dark"] .agent-msg-actions .chat-action-btn:hover {
 .agent-msg-bubble th, .agent-msg-bubble td {
 	border: 1px solid var(--border-color);
 	padding: 10px 14px;
-	text-align: left;
+	text-align: start;
 	font-variant-numeric: tabular-nums;
 	white-space: nowrap; /* Prevent messy line wraps inside data cells */
 }

@@ -1622,7 +1622,7 @@ class ChatUIManager {
 
 		let editor_html = `
 			<div class="agent-msg-edit-box">
-				<textarea class="agent-msg-edit-textarea">${frappe.utils.escape_html(raw_content)}</textarea>
+				<textarea class="agent-msg-edit-textarea" dir="auto">${frappe.utils.escape_html(raw_content)}</textarea>
 				<div class="agent-msg-edit-controls">
 					<button class="btn btn-xs btn-secondary agent-msg-edit-cancel">${__("Cancel")}</button>
 					<button class="btn btn-xs btn-primary agent-msg-edit-save">${__("Save & Submit")}</button>
@@ -1796,7 +1796,7 @@ class ChatUIManager {
 					<div class="agent-todo-item-row">
 						<span class="agent-todo-status-icon">${this._todo_status_icon(task.status)}</span>
 						<i class="fa ${this._todo_kind_icon(task)} agent-todo-kind-icon"></i>
-						<span class="agent-todo-title">${frappe.utils.escape_html(task.title || "")}</span>
+						<span class="agent-todo-title" dir="auto">${frappe.utils.escape_html(task.title || "")}</span>
 						<span class="agent-todo-status-label">${this._todo_status_label(task.status)}</span>
 						${caret}
 					</div>
@@ -2569,6 +2569,37 @@ class ChatUIManager {
 		return html;
 	}
 
+	// EVERY PARAGRAPH READS IN ITS OWN DIRECTION. The agent answers in the
+	// customer's language, and an Arabic, Hebrew, Persian or Urdu answer
+	// always carries Latin inside it: account names, item codes, "IFRS",
+	// "Razyyn AI", a document number. Rendered into an English page, such a
+	// paragraph starts at the left and the browser lays its Arabic out
+	// against the Latin — the customer reads it as flipped. dir="auto" on
+	// each block makes the browser read the block's first strong letter and
+	// set that block's direction from it: Arabic paragraphs start at the
+	// right with their bullets and table cells following, English ones at the
+	// left, and the Latin words inside an Arabic sentence still run
+	// left-to-right on their own, as the bidi algorithm has always done. It
+	// is per block, so a reply that mixes languages reads right in both,
+	// and it knows nothing about which languages exist.
+	//
+	// The blocks, not the bubble: one attribute on the bubble would set the
+	// whole answer from its first letter, and an English heading over Arabic
+	// paragraphs would flip every paragraph under it. A <template> is inert,
+	// so the sanitized markup is walked without ever running — this runs on
+	// what DOMPurify has already passed, never on raw text.
+	readable_in_its_own_direction(html) {
+		if (!html || typeof document === "undefined") return html;
+		let holder = document.createElement("template");
+		holder.innerHTML = html;
+		holder.content
+			.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, th, td, blockquote, pre, summary, ul, ol, table")
+			.forEach((block) => {
+				if (!block.hasAttribute("dir")) block.setAttribute("dir", "auto");
+			});
+		return holder.innerHTML;
+	}
+
 	// `stream.current_agent`/`data.agent` is meant to be a short desk key
 	// ("ask", "analyse", ...), but it arrives over the realtime channel as a
 	// plain string, and it gets interpolated raw into a `class="agent-type-…"`
@@ -2585,7 +2616,7 @@ class ChatUIManager {
 
 		if (window.marked && window.DOMPurify) {
 			try {
-				return this.sanitize_html(window.marked.parse(text));
+				return this.readable_in_its_own_direction(this.sanitize_html(window.marked.parse(text)));
 			} catch (err) {
 				console.error("Marked parsing error:", err);
 			}
@@ -2721,7 +2752,7 @@ class ChatUIManager {
 		temp_output = temp_output.replace(/```(.*?)```/gs, "<pre><code>$1</code></pre>");
 		temp_output = temp_output.replace(/`(.*?)`/g, "<code>$1</code>");
 
-		return this.sanitize_html(temp_output);
+		return this.readable_in_its_own_direction(this.sanitize_html(temp_output));
 	}
 
 	post_process_rendered_bubble(container) {
@@ -4187,6 +4218,7 @@ class ChatMessageHandler {
 			if (this.chat.session_manager.session_id === active_session_id) {
 				this.set_button_state("send");
 				console.error("Message send failed:", err);
+				this.chat.stop_stream_timer(active_session_id);
 				let error_msg = err.message || "";
 				if (!error_msg.includes("cancelled") && !error_msg.includes("cancellation")) {
 					let final_err = error_msg || __("Unable to get response from Razyyn.");
@@ -4802,6 +4834,29 @@ const RAZYYN_BRAND_MARK = `
 	</span>
 `;
 
+/**
+ * Where the Terms of Use live, in the reader's own language.
+ *
+ * The site publishes one page per language under its own prefix, and this
+ * window already runs in three (English, French, Arabic). Sending an Arabic
+ * customer to the English terms and asking them to agree to it is asking for
+ * agreement to something they were not given, so the link follows the window.
+ *
+ * Defensive about `frappe.boot` on purpose: this file is copied byte-for-byte
+ * into the Odoo module, where `frappe` is a shim (razyyn_platform.js). It
+ * publishes `boot.lang`, but a link that throws would take the whole sign-up
+ * card down with it, so an unknown language falls back to English rather than
+ * to an error.
+ */
+function razyyn_terms_url() {
+	let lang = String(
+		(window.frappe && frappe.boot && frappe.boot.lang) || 'en'
+	).slice(0, 2).toLowerCase();
+	return (lang === 'ar' || lang === 'fr')
+		? `https://razyyn.com/${lang}/terms/`
+		: 'https://razyyn.com/terms/';
+}
+
 frappe.pages['agent-chat'].on_page_load = function (wrapper) {
 	try {
 		delete localStorage['_page:agent-chat'];
@@ -5354,6 +5409,14 @@ class AccountantAgentChat {
 							<input type="text" id="auth-company" placeholder="e.g. My Company Corp">
 						</div>
 
+						<div class="form-group signup-field" style="display: ${this.active_tab === 'signup' ? 'block' : 'none'};">
+							<label for="auth-country">${__('Country')}</label>
+							<select id="auth-country">
+								<option value="">${__('Loading countries…')}</option>
+							</select>
+							<small class="text-muted auth-country-note">${__('The country your books are kept under. It decides which accounting law the agent applies.')}</small>
+						</div>
+
 						<div class="form-group">
 							<label for="auth-email">${__('Email Address')}</label>
 							<input type="email" id="auth-email" placeholder="email@example.com" required>
@@ -5362,6 +5425,15 @@ class AccountantAgentChat {
 						<div class="form-group">
 							<label for="auth-password">${__('Password')}</label>
 							<input type="password" id="auth-password" placeholder="••••••••" required>
+						</div>
+
+						<div class="form-group signup-field agent-auth-terms" style="display: ${this.active_tab === 'signup' ? 'block' : 'none'};">
+							<label for="auth-terms">
+								<input type="checkbox" id="auth-terms">
+								<span>${__('I have read and agree to the')}
+									<a href="${razyyn_terms_url()}" target="_blank" rel="noopener noreferrer">${__('Terms of Use')}</a>
+								</span>
+							</label>
 						</div>
 
 						<button type="submit" class="agent-auth-btn">
@@ -5374,6 +5446,88 @@ class AccountantAgentChat {
 
 		let $card = $(card_html).appendTo(this.container);
 		this.setup_auth_events($card);
+		// Settled on every render, whichever tab is showing: a button whose
+		// state is only ever set inside a fetch keeps a stale one whenever that
+		// fetch does not run.
+		this.update_auth_button_state($card);
+		// Only the Sign Up tab needs the list, so somebody who came here to log
+		// in never waits on a call they have no use for.
+		if (this.active_tab === 'signup') this.load_signup_countries($card);
+	}
+
+	// The country list comes from the platform, never from a copy kept here:
+	// the platform refuses a code outside its own list, so a list maintained in
+	// this app would eventually offer a country the registration is then
+	// refused for — after the customer had typed a password.
+	//
+	// Fetched once per card. If it cannot be fetched, sign-up is disabled with
+	// the reason shown, because the same server is what creates the account: a
+	// form that lets someone fill it in anyway would fail at the last step.
+	async load_signup_countries($card) {
+		let $select = $card.find('#auth-country');
+		if (!$select.length || this.signup_countries_loading) return;
+		// Deliberately NOT cached across attempts. The interesting case is the
+		// one where it failed — the platform was down for a moment — and the
+		// only recovery a customer has is coming back to this tab. One small
+		// GET is a cheap price for a form that heals itself instead of staying
+		// broken until the page is reloaded.
+		if (this.signup_countries_loaded) return;
+		this.signup_countries_loading = true;
+		$card.find('.auth-country-note')
+			.text(__('The country your books are kept under. It decides which accounting law the agent applies.'))
+			.css('color', '');
+		try {
+			let res = await frappe.xcall(
+				'accountant_agent.accountant_agent.page.agent_chat.agent_chat.get_signup_countries'
+			);
+			let countries = (res && res.countries) || [];
+			let chosen = (res && res.suggested) || '';
+			if (!countries.length) {
+				// The server answered and had nothing to give — it could not
+				// reach the platform. Said here, beside the box, rather than in
+				// a dialog over a form nobody has filled in yet.
+				throw new Error((res && res.error) || __('Could not load countries'));
+			}
+			$select.empty().append(
+				`<option value="">${__('Select your country')}</option>`
+			);
+			countries.forEach((country) => {
+				$select.append(
+					$('<option></option>').attr('value', country.code).text(country.name)
+				);
+			});
+			if (chosen) $select.val(chosen);
+			this.signup_countries_failed = false;
+			this.signup_countries_error = '';
+			// Only a successful list is remembered; a failure is retried.
+			this.signup_countries_loaded = true;
+		} catch (err) {
+			console.error('Could not load the country list:', err);
+			this.signup_countries_failed = true;
+			this.signup_countries_loaded = false;
+			this.signup_countries_error = (err && err.message) || __('Could not load countries');
+			$select.empty().append(
+				`<option value="">${__('Could not load countries')}</option>`
+			);
+			$card.find('.auth-country-note')
+				.text(this.signup_countries_error + ' ' + __('Switch to Login and back to try again.'))
+				.css('color', 'var(--red-500, #b91c1c)');
+		} finally {
+			this.signup_countries_loading = false;
+			this.update_auth_button_state($card);
+		}
+	}
+
+	// Sign-up needs a country; login does not. One place decides, so the button
+	// can never be enabled on a form that cannot be submitted.
+	update_auth_button_state($card) {
+		let $button = $card.find('.agent-auth-btn');
+		let blocked = this.active_tab === 'signup' && this.signup_countries_failed;
+		$button.prop('disabled', blocked);
+		$button.attr(
+			'title',
+			blocked ? __('The Agent Server could not be reached to load the country list.') : ''
+		);
 	}
 
 	setup_auth_events($card) {
@@ -5386,10 +5540,12 @@ class AccountantAgentChat {
 			if (tab === 'signup') {
 				$card.find('.signup-field').slideDown(200);
 				$card.find('.agent-auth-btn').text(__('Create Account'));
+				this.load_signup_countries($card);
 			} else {
 				$card.find('.signup-field').slideUp(200);
 				$card.find('.agent-auth-btn').text(__('Connect'));
 			}
+			this.update_auth_button_state($card);
 		});
 
 		$card.find('#agent-auth-form').on('submit', async (e) => {
@@ -5398,6 +5554,35 @@ class AccountantAgentChat {
 			let company_name = $card.find('#auth-company').val();
 			let email = $card.find('#auth-email').val();
 			let password = $card.find('#auth-password').val();
+			let country_code = $card.find('#auth-country').val();
+			let accepted_terms = $card.find('#auth-terms').is(':checked');
+
+			// Asked for, not defaulted. The platform would accept a
+			// registration without it and fall back to Egypt, which is the
+			// silent wrong answer for every customer outside Egypt — their
+			// books audited against a law that is not theirs, with nothing
+			// reporting an error.
+			if (this.active_tab === 'signup' && !country_code) {
+				frappe.show_alert({
+					message: __('Please choose the country your books are kept under.'),
+					indicator: 'orange',
+				});
+				return;
+			}
+
+			// Refused HERE rather than by disabling the button: an unticked box
+			// is a form somebody has not finished, not a form that cannot
+			// succeed. The button is reserved for the second kind (the country
+			// list could not be loaded, so the account cannot be created at
+			// all), and a disabled button would also have to be re-enabled from
+			// a handler on the box — a second place to get wrong.
+			if (this.active_tab === 'signup' && !accepted_terms) {
+				frappe.show_alert({
+					message: __('Please accept the Terms of Use to create an account.'),
+					indicator: 'orange',
+				});
+				return;
+			}
 
 			frappe.dom.freeze(this.active_tab === 'login' ? __('Connecting...') : __('Creating Account...'));
 
@@ -5408,7 +5593,9 @@ class AccountantAgentChat {
 						mode: this.active_tab,
 						email: email,
 						password: password,
-						company_name: company_name
+						company_name: company_name,
+						country_code: country_code,
+						accepted_terms: accepted_terms
 					}
 				);
 
@@ -5485,7 +5672,7 @@ class AccountantAgentChat {
 					<div class="agent-input-container">
 						<div class="agent-clarification-popup" style="display: none;"></div>
 						<div class="agent-input-card">
-							<textarea class="agent-textarea" placeholder="${__('Type your financial question or query here...')}" id="agent-input-msg" maxlength="10000"></textarea>
+							<textarea class="agent-textarea" dir="auto" placeholder="${__('Type your financial question or query here...')}" id="agent-input-msg" maxlength="10000"></textarea>
 							<div class="agent-input-footer">
 								<div class="agent-input-footer-left"></div>
 								<div class="agent-input-footer-right">

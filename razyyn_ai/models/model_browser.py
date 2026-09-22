@@ -23,7 +23,7 @@ IT GRANTS NOTHING
 
 from __future__ import annotations
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError
 
 
@@ -64,9 +64,9 @@ class IrModel(models.Model):
         self.ensure_one()
         target = self.env.get(self.model)
         if target is None:
-            raise UserError(self.env._("The model %s is not installed on this database.", self.model))
+            raise UserError(_("The model %s is not installed on this database.", self.model))
         if target._abstract:
-            raise UserError(self.env._(
+            raise UserError(_(
                 "%s is an abstract model: it defines behaviour that other models "
                 "reuse and has no records of its own.", self.model))
 

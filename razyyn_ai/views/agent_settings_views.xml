@@ -47,6 +47,12 @@
                             <field name="access_token" password="True"/>
                         </group>
                     </group>
+                    <!-- ON THE SHEET, NOT BEHIND A TAB. This is the figure that
+                         says whether the next request will be refused; a warning
+                         two clicks deep is a warning nobody reads. Same place the
+                         ERPNext card sits on its own settings screen. -->
+                    <field name="plan_usage" widget="razyyn_plan_usage"
+                           nolabel="1" colspan="2"/>
                     <group string="Write Operations &amp; Ledger Access">
                         <field name="write_recording_enabled"/>
                     </group>

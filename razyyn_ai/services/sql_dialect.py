@@ -129,6 +129,14 @@ _CLAUSE_END = re.compile(
 )
 
 JSONB = "jsonb"
+#: A jsonb column keyed by COMPANY ID rather than by language - Odoo 18's
+#: `account_account.code_store` is one. Reported by the caller's type map
+#: (the database says only "jsonb"; the model says which kind), and read
+#: with the connection's company rather than a language. Without the
+#: distinction every rewrite below applied `->>'en_US'` to it and the
+#: query ran - returning nothing at all for every account.
+JSONB_COMPANY = "jsonb_company"
+JSON_KINDS = (JSONB, JSONB_COMPANY)
 
 
 # ─── Keeping string literals out of it ───────────────────────────────────────
@@ -289,15 +297,44 @@ def translated_read(reference: str, languages) -> str:
     return f"COALESCE({', '.join(reads)})"
 
 
-def rewrite(sql: str, types_for_table, languages=("en_US",)) -> str:
+def company_read(reference: str, company_id) -> str:
+    """How to read a per-company JSON column as text, for one company."""
+    return f"{reference}->>'{int(company_id)}'"
+
+
+class _Reader:
+    """How each kind of JSON column is read as text on this site.
+
+    A translated column is read through the site's languages; a per-company
+    column through the connection's company. A per-company column with NO
+    company to read it for is left exactly as written - the database's own
+    error is better than a guess at whose figure it is.
+    """
+
+    def __init__(self, languages, company_id) -> None:
+        self.languages, self.company_id = languages, company_id
+
+    def handles(self, kind) -> bool:
+        if kind == JSONB:
+            return True
+        return kind == JSONB_COMPANY and self.company_id is not None
+
+    def read(self, kind, reference: str) -> str:
+        if kind == JSONB_COMPANY:
+            return company_read(reference, self.company_id)
+        return translated_read(reference, self.languages)
+
+
+def rewrite(sql: str, types_for_table, languages=("en_US",), company_id=None) -> str:
     """The same query, in the dialect this database actually speaks."""
     masked, literals = _mask(sql)
     schema = _Schema(masked, types_for_table)
+    reader = _Reader(languages, company_id)
 
     masked = _fix_json_reads(masked, schema)
-    masked = _fix_select_list(masked, schema, languages)
-    masked = _fix_comparisons(masked, schema, languages)
-    masked = _fix_sorting(masked, schema, languages)
+    masked = _fix_select_list(masked, schema, reader)
+    masked = _fix_comparisons(masked, schema, reader)
+    masked = _fix_sorting(masked, schema, reader)
 
     return _unmask(masked, literals)
 
@@ -317,19 +354,20 @@ def _fix_json_reads(sql: str, schema: _Schema) -> str:
     def replace(match: re.Match) -> str:
         qualifier, column = match.group("qualifier"), match.group("column")
         kind = schema.type_of(qualifier, column)
-        if kind is None or kind == JSONB:
+        if kind is None or kind in JSON_KINDS:
             return match.group(0)
         return _reference(qualifier, column)
 
     return _JSON_READ.sub(replace, sql)
 
 
-def _fix_comparisons(sql: str, schema: _Schema, languages) -> str:
+def _fix_comparisons(sql: str, schema: _Schema, reader: _Reader) -> str:
     def replace(match: re.Match) -> str:
         qualifier, column = match.group("qualifier"), match.group("column")
-        if schema.type_of(qualifier, column) != JSONB:
+        kind = schema.type_of(qualifier, column)
+        if not reader.handles(kind):
             return match.group(0)
-        read = translated_read(_reference(qualifier, column), languages)
+        read = reader.read(kind, _reference(qualifier, column))
         return read + match.group(0)[match.end("column") - match.start():]
 
     for pattern in (_PATTERN_OPERATOR, _EQUALITY_TO_A_LITERAL, _IN_A_LIST_OF_LITERALS):
@@ -392,7 +430,7 @@ def _split_top_level(text: str) -> list[str]:
     return items
 
 
-def _fix_select_list(sql: str, schema: _Schema, languages) -> str:
+def _fix_select_list(sql: str, schema: _Schema, reader: _Reader) -> str:
     """`SELECT name` on a translated column hands back `{"en_US": "Bank"}`.
 
     That one does not fail -- which is worse. The agent gets a JSON object
@@ -416,17 +454,29 @@ def _fix_select_list(sql: str, schema: _Schema, languages) -> str:
             rewritten.append(item)
             continue
 
-        if schema.type_of(qualifier, column) != JSONB:
+        kind = schema.type_of(qualifier, column)
+        if not reader.handles(kind):
             rewritten.append(item)
             continue
 
-        read = translated_read(_reference(qualifier, column), languages)
-        rewritten.append(f" {read} AS {alias}")
+        read = reader.read(kind, _reference(qualifier, column))
+        # THE ITEM'S OWN WHITESPACE IS KEPT, ON BOTH SIDES. The last item of a
+        # SELECT list runs straight into FROM: `SELECT id, name FROM ...` is
+        # split into "id" and " name ", and rewriting the second as
+        # " name->>'en_US' AS name" glued the alias to the keyword -
+        # `AS nameFROM account_account` - a syntax error on every query that
+        # ended its list with a translated column. The test that covered
+        # this asserted a substring and never read the whole statement.
+        leading = item[:len(item) - len(item.lstrip())]
+        trailing = item[len(item.rstrip()):]
+        rewritten.append(f"{leading or ' '}{read} AS {alias}{trailing}")
 
+    if rewritten and not rewritten[-1][-1:].isspace():
+        rewritten[-1] += " "
     return sql[:start] + ",".join(rewritten) + sql[end:]
 
 
-def _fix_sorting(sql: str, schema: _Schema, languages) -> str:
+def _fix_sorting(sql: str, schema: _Schema, reader: _Reader) -> str:
     """ORDER BY / GROUP BY on a translated column sorts by raw JSON text.
 
     It runs, so nothing complains -- and the rows come back in an order that
@@ -451,11 +501,12 @@ def _fix_sorting(sql: str, schema: _Schema, languages) -> str:
                 items.append(item)
                 continue
             qualifier, column = plain.groups()
-            if schema.type_of(qualifier, column) != JSONB:
+            kind = schema.type_of(qualifier, column)
+            if not reader.handles(kind):
                 items.append(item)
                 continue
             items.append(
-                " " + translated_read(_reference(qualifier, column), languages) + direction
+                " " + reader.read(kind, _reference(qualifier, column)) + direction
             )
 
         out = out[:start] + ",".join(items) + out[end:]

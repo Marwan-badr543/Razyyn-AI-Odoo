@@ -36,7 +36,7 @@ WHY THERE IS EXACTLY ONE OF THESE RECORDS
     make one and the menu opens the existing one rather than a list.
 """
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 #: The channel keys on the wire. Spelled the agent's way — `gmail` is the email
@@ -171,7 +171,7 @@ class AgentMessagingSettings(models.Model):
         """
         vals_list = list(vals_list)
         if self.sudo().search_count([]) + len(vals_list) > 1:
-            raise UserError(self.env._(
+            raise UserError(_(
                 "There is one messaging configuration for this system and it "
                 "already exists. Open it from Razyyn AI → Messaging Channels "
                 "and edit it rather than adding a second one."
@@ -189,7 +189,7 @@ class AgentMessagingSettings(models.Model):
         settings = self.get_settings_singleton()
         return {
             "type": "ir.actions.act_window",
-            "name": self.env._("Messaging Channels"),
+            "name": _("Messaging Channels"),
             "res_model": self._name,
             "view_mode": "form",
             "res_id": settings.id,

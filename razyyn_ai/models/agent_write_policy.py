@@ -17,7 +17,7 @@ Mirrors Frappe Agent Write Policy:
 - posting_date_max_days_forward: Maximum days forward for future-dating (0 = forbidden)
 """
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
 
@@ -103,7 +103,7 @@ class AgentWritePolicy(models.Model):
         """
         vals_list = list(vals_list)
         if self.sudo().search_count([]) + len(vals_list) > 1:
-            raise UserError(self.env._(
+            raise UserError(_(
                 "There is one write governance policy for this system and it "
                 "already exists. Open it from Razyyn AI → Write Policy and "
                 "edit it rather than adding a second one."
@@ -116,7 +116,7 @@ class AgentWritePolicy(models.Model):
         policy = self.get_policy_singleton()
         return {
             "type": "ir.actions.act_window",
-            "name": self.env._("Write Governance Policy"),
+            "name": _("Write Governance Policy"),
             "res_model": self._name,
             "view_mode": "form",
             "res_id": policy.id,

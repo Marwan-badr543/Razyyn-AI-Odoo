@@ -1,0 +1,110 @@
+/* Copyright (c) 2026, Marwan Badr and contributors
+   For license information, please see LICENSE
+
+   Styled with Odoo's own variables rather than a fixed palette, so the card
+   follows the site's theme instead of inverting badly on a dark one. The three
+   usage tones are the exception: they are a traffic light, and a traffic light
+   that takes the theme's accent colour stops being one. */
+
+.razyyn_usage { width: 100%; }
+
+.razyyn_usage_head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.razyyn_usage_head h4 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.razyyn_usage_refresh { padding: 0; font-size: 12px; }
+
+.razyyn_usage_muted {
+    color: var(--o-main-text-color, #6b7280);
+    opacity: .7;
+    font-size: 13px;
+}
+
+/* The plan badge. An unknown tier falls back to the neutral styling in ONE
+   visible place, instead of quietly wearing the free tier's colours. */
+.razyyn_usage_plan {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: #f3f4f6;
+    color: #4b5563;
+    border: 1px solid #e5e7eb;
+}
+.razyyn_usage_plan_plus  { background: #ecfdf5; color: #059669; border-color: #a7f3d0; }
+.razyyn_usage_plan_pro   { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
+.razyyn_usage_plan_ultra { background: #f5f3ff; color: #7c3aed; border-color: #ddd6fe; }
+.razyyn_usage_plan_custom{ background: #faf5ff; color: #a855f7; border-color: #e9d5ff; }
+
+.razyyn_usage_row {
+    margin-top: 16px;
+    padding: 14px;
+    border: 1px solid var(--o-gray-200, #e5e7eb);
+    border-radius: 10px;
+}
+.razyyn_usage_labels {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+.razyyn_usage_figure {
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 12px;
+}
+.razyyn_usage_ok      { background: #d1fae5; color: #059669; }
+.razyyn_usage_warning { background: #fef3c7; color: #d97706; }
+.razyyn_usage_danger  { background: #fee2e2; color: #dc2626; }
+
+.razyyn_usage_track {
+    height: 10px;
+    background: var(--o-gray-200, #e5e7eb);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.razyyn_usage_fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width .6s ease-in-out;
+}
+.razyyn_usage_fill_ok      { background: linear-gradient(90deg, #10a37f, #34d399); }
+.razyyn_usage_fill_warning { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.razyyn_usage_fill_danger  { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+.razyyn_usage_row small {
+    display: block;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--o-main-text-color, #6b7280);
+    opacity: .8;
+}
+.razyyn_usage_unreadable { opacity: 1; color: var(--o-warning, #d97706) !important; }
+
+.razyyn_usage_upgrade {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--o-gray-200, #eceff3);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--o-main-text-color, #6b7280);
+}

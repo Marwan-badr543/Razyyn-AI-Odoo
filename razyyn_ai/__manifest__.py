@@ -1,9 +1,9 @@
-# Copyright (c) 2026, Marwan Badr and contributors
+# Copyright (c) 2026, Razyyn AI and contributors
 # For license information, please see LICENSE
 
 {
     "name": "Razyyn AI",
-    "version": "18.0.1.9.1",
+    "version": "18.0.1.10.0",
     "summary": "The Razyyn AI accounting agent, inside Odoo: chat, reading, "
                "and governed recording of entries.",
     "description": """
@@ -17,6 +17,7 @@ The same product ERPNext customers use, on Odoo:
 - Read-only SQL guard and dynamic schema introspection
 - Recording of entries with ledger validation and strict written governance
 - One-click connection to the Razyyn platform
+- Plan usage, read live from the platform, with the plans a click away
 - Append-only, tamper-evident write audit logs
 
 The chat window is not a second implementation. It is the Frappe app's own,
@@ -24,7 +25,7 @@ copied file for file by tools/sync_from_frappe.py and given an Odoo to run on
 by static/src/chat/razyyn_platform.js, so both products get every improvement
 and neither can drift.
     """,
-    "author": "Marwan Badr",
+    "author": "Razyyn AI",
     "maintainer": "Razyyn AI",
     "website": "https://razyyn.com",
     "license": "LGPL-3",
@@ -61,6 +62,11 @@ and neither can drift.
             "razyyn_ai/static/src/backend/company_knowledge.js",
             "razyyn_ai/static/src/backend/company_knowledge.xml",
             "razyyn_ai/static/src/backend/company_knowledge.css",
+            # The plan usage bar on Agent Settings, for the same reason: it is
+            # an Odoo form widget and should follow Odoo's own theme.
+            "razyyn_ai/static/src/backend/plan_usage.js",
+            "razyyn_ai/static/src/backend/plan_usage.xml",
+            "razyyn_ai/static/src/backend/plan_usage.css",
         ],
     },
     # NO "external_dependencies" HERE, AND IT MUST NOT BE ADDED.

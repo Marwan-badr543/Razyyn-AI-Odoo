@@ -6,3 +6,4 @@ from . import test_stream_events
 from . import test_a_change_replaces_the_table
 from . import test_a_number_is_a_name_first
 from . import test_the_system_fills_it_in_itself
+from . import test_the_terms_of_use_are_agreed_to

@@ -46,11 +46,15 @@ SCHEMA = {
     "res_currency": {"id": "integer", "name": "character varying", "symbol": "character varying"},
     "res_company": {"id": "integer", "name": "character varying", "currency_id": "integer"},
     "ir_sequence": {"id": "integer", "name": "character varying", "code": "character varying"},
+    # Odoo 18: the account code is per company, kept as JSON keyed by company id.
+    "account_account_v18": {"id": "integer", "name": "jsonb", "code_store": "jsonb_company",
+                            "account_type": "character varying"},
 }
 
 
-def run(sql, languages=("en_US",)):
-    return dialect.rewrite(sql, lambda table: SCHEMA.get(table, {}), languages)
+def run(sql, languages=("en_US",), company_id=None):
+    return dialect.rewrite(sql, lambda table: SCHEMA.get(table, {}), languages,
+                           company_id=company_id)
 
 
 class TheQueriesThatFailed(unittest.TestCase):
@@ -96,13 +100,27 @@ class SelectingAName(unittest.TestCase):
     """This one does not fail, which is worse."""
 
     def test_a_bare_translated_column_comes_back_as_json(self):
-        out = run("SELECT id, name FROM account_account")
-        self.assertIn("name->>'en_US' AS name", out)
+        # The WHOLE statement, not a substring: the alias used to be glued to
+        # FROM (`AS nameFROM account_account`) and a substring check passed.
+        self.assertEqual(
+            run("SELECT id, name FROM account_account"),
+            "SELECT id, name->>'en_US' AS name FROM account_account",
+        )
+
+    def test_the_last_item_keeps_its_distance_from_from(self):
+        self.assertEqual(
+            run("SELECT id, name FROM account_account WHERE name ILIKE '%bank%' LIMIT 3"),
+            "SELECT id, name->>'en_US' AS name FROM account_account "
+            "WHERE name->>'en_US' ILIKE '%bank%' LIMIT 3",
+        )
+        self.assertEqual(
+            run("SELECT name\nFROM account_account"),
+            "SELECT name->>'en_US' AS name\nFROM account_account",
+        )
 
     def test_it_keeps_the_alias_the_query_asked_for(self):
         out = run("SELECT id, name AS account_name FROM account_account")
-        self.assertIn("AS account_name", out)
-        self.assertNotIn("AS name", out)
+        self.assertEqual(out, "SELECT id, name->>'en_US' AS account_name FROM account_account")
 
     def test_a_plain_column_is_left_exactly_as_it_was(self):
         sql = "SELECT id, name, symbol FROM res_currency ORDER BY name"
@@ -221,3 +239,39 @@ class WithAQueryInFront(unittest.TestCase):
         # The outer list is `*`; the CTE's own SELECT is not the outermost one
         # and must not be rewritten as if it were.
         self.assertIn("SELECT * FROM names", out)
+
+
+class APerCompanyJsonColumn(unittest.TestCase):
+    """Odoo 18 keeps `account_account.code` per company in `code_store`, a
+    jsonb column keyed by COMPANY ID. Read by language it returns nothing -
+    and the query runs, so nothing complains."""
+
+    def test_it_is_read_by_the_connections_company_not_by_language(self):
+        self.assertEqual(
+            run("SELECT id, code_store, name FROM account_account_v18 WHERE code_store = '101001'",
+                company_id=1),
+            "SELECT id, code_store->>'1' AS code_store, name->>'en_US' AS name "
+            "FROM account_account_v18 WHERE code_store->>'1' = '101001'",
+        )
+
+    def test_a_pattern_and_an_order_go_the_same_way(self):
+        self.assertEqual(
+            run("SELECT id FROM account_account_v18 WHERE code_store LIKE '1010%' ORDER BY code_store",
+                company_id=2),
+            "SELECT id FROM account_account_v18 WHERE code_store->>'2' LIKE '1010%' "
+            "ORDER BY code_store->>'2'",
+        )
+
+    def test_a_company_the_agent_named_itself_is_kept(self):
+        sql = "SELECT id FROM account_account_v18 WHERE code_store->>'2' = '101001'"
+        self.assertEqual(run(sql, company_id=1), sql)
+
+    def test_without_a_company_it_is_left_exactly_as_written(self):
+        sql = "SELECT id, code_store FROM account_account_v18 WHERE code_store = '101001'"
+        self.assertEqual(run(sql), sql)
+
+    def test_a_translated_column_is_still_read_by_language(self):
+        self.assertEqual(
+            run("SELECT name FROM account_account_v18 WHERE name ILIKE '%bank%'", company_id=1),
+            "SELECT name->>'en_US' AS name FROM account_account_v18 WHERE name->>'en_US' ILIKE '%bank%'",
+        )
