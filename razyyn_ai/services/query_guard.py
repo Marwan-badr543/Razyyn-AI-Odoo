@@ -367,6 +367,29 @@ def assert_query_is_read_only(query: str) -> None:
     if not _SELECT_START_PATTERN.match(query):
         raise ForbiddenQueryError("Only SELECT queries are allowed for security reasons.")
 
+    # A BACKSLASH IS REFUSED BEFORE THE LITERALS ARE MASKED.
+    #
+    #     ``mask_string_literals`` treats ``\\'`` as an escaped quote that keeps a
+    #     string open — MariaDB's rule. PostgreSQL with
+    #     ``standard_conforming_strings`` on (its default, and the dialect this
+    #     app runs) does the opposite: ``'a\\'`` is the closed two-char string
+    #     ``a\\`` and everything after it is live SQL. That divergence let a
+    #     SINGLE-statement ``SELECT 'x\\' AS a, value FROM ir_config_parameter
+    #     WHERE k='...`` mask its own ``FROM ir_config_parameter`` out of the
+    #     scan below while Postgres executed the credential read underneath the
+    #     LIMIT wrapper. No accounting SELECT needs a literal backslash (a quote
+    #     inside a string is ``''``), so refusing it closes the whole divergence
+    #     class — backslash escapes and ``E'...\\''`` escapes alike — without the
+    #     guard having to reason about the dialect. Kept identical in the
+    #     platform's ``agent/tools/sql_guard.py`` and the Frappe app's guard.
+    if "\\" in query:
+        raise ForbiddenQueryError(
+            "Query must not contain a backslash (\\). Database engines disagree "
+            "on whether it escapes a quote, which can hide a second statement or "
+            "a forbidden table from this check. Write a literal quote inside a "
+            "string as '' (two single quotes) and remove the backslash."
+        )
+
     scannable = mask_string_literals(query)
 
     # Stacked statements. psycopg2 executes every statement in a multi-statement

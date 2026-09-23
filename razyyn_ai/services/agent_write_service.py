@@ -534,6 +534,10 @@ def search_documents(
                 "label": record.display_name,
                 "docstatus": _docstatus(record),
                 "company": company_name,
+                # WHO IT IS WITH. See `_record_party`: a draft's displayed name
+                # names no party, so without this the agent cannot tell one
+                # draft invoice from another on the card a person approves.
+                "party": _record_party(record),
             })
 
     return {"documents": documents, "unavailable": unavailable, "total_matched": total}
@@ -569,6 +573,9 @@ def read_document_state(env, doctype: str, docname: str) -> dict[str, Any] | Non
         "docstatus": _docstatus(record),
         "company": _company_of(record),
         "amount": _record_amount(record),
+        # See `_record_party`. This is the line that would have shown the wrong
+        # customer on the approval card before the invoice was posted.
+        "party": _record_party(record),
     }
 
 
@@ -581,6 +588,35 @@ def _company_of(record) -> str:
     """
     if "company_id" in record._fields and record.company_id:
         return record.company_id.name
+    return ""
+
+
+def _record_party(record) -> str:
+    """Who a document is WITH, by name, or nothing.
+
+    THE ONE FACT A PERSON CHECKS A DOCUMENT BY, AND IT WAS NOT PUBLISHED.
+        A record's `display_name` is all the agent had to describe a document
+        on the card a customer approves. For an unposted `account.move` that
+        name is the literal string "Draft Invoice" — no party, no number,
+        nothing that distinguishes it from every other draft on the database.
+        So an invoice written to the wrong customer was approved, posted,
+        reversed and re-entered across six approval rounds without the wrong
+        name ever appearing on screen: each card truthfully said "Draft
+        Invoice — 8000.0, YourCompany", about three different parties.
+
+    Read from the record, never recalled, and empty for the models that have
+    no counterparty — a company, a product — rather than inventing one.
+    """
+    for name in ("partner_id", "employee_id", "user_id"):
+        field = record._fields.get(name)
+        if field is None or field.type != "many2one":
+            continue
+        try:
+            linked = record[name]
+        except Exception:  # noqa: BLE001 — a label is never worth a failure
+            continue
+        if linked:
+            return linked.display_name or ""
     return ""
 
 
@@ -1197,7 +1233,7 @@ def _record_log(env, *, idempotency_key, action, doctype, payload, session_id=""
 
 def _result(entry, ordinal, outcome, *, docname="", docstatus=None,
             amount=None, label="", company="", error_code="",
-            error_message="") -> dict[str, Any]:
+            error_message="", party="") -> dict[str, Any]:
     """One row of the batch's answer, in the shape the client's receipt reads."""
     return {
         "ordinal": ordinal,
@@ -1216,6 +1252,10 @@ def _result(entry, ordinal, outcome, *, docname="", docstatus=None,
         # carrying only an internal id gives them nothing to look for.
         "label": label,
         "company": company,
+        # WHO THE DOCUMENT IS WITH. A receipt naming only a draft's label says
+        # "Draft Invoice" and nothing else; the party is what the accountant
+        # reads it back by. See `_record_party`.
+        "party": party,
         "error_code": error_code,
         "error_message": error_message,
     }
@@ -1403,7 +1443,8 @@ def _apply(env, action, doctype, payload, entry, key, session_id, policy):
     # company sees an empty list and concludes nothing was written. Both are
     # answered here, from the record itself, at the moment it was written.
     return (str(record.id), docstatus, _payload_amount(payload),
-            record.display_name or "", _company_of(record))
+            record.display_name or "", _company_of(record),
+            _record_party(record))
 
 
 def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any]) -> None:
@@ -1540,6 +1581,7 @@ def write_documents_batch(
                 docstatus=replayed.get("docstatus_written"),
                 label=existing.get("label") or "",
                 company=existing.get("company") or "",
+                party=existing.get("party") or "",
             ))
             continue
 
@@ -1559,7 +1601,7 @@ def write_documents_batch(
             entry["docname"] = _resolve_references(
                 {"docname": entry.get("docname")}, produced
             )["docname"]
-            docname, docstatus, amount, label, company = _apply(
+            docname, docstatus, amount, label, company, party = _apply(
                 env, action, doctype, resolved, entry, key, session_id, policy,
             )
         except AgentWriteError as exc:
@@ -1610,7 +1652,7 @@ def write_documents_batch(
             entry, ordinal,
             "CREATED" if action == "create" else "UPDATED",
             docname=docname, docstatus=docstatus, amount=amount,
-            label=label, company=company,
+            label=label, company=company, party=party,
         ))
 
     return {"results": results}

@@ -14,6 +14,50 @@ original changes.
 from __future__ import annotations
 
 
+def named_by(text: str, matches):
+    """The matches that answer to *text* IN THEIR OWN DISPLAYED NAME.
+
+    ONLY EVER APPLIED TO A NUMBER, AND THIS IS WHY.
+        `name_search` searches more columns than the one a person reads. On
+        `res.partner` Odoo searches `complete_name`, `email`, `ref`, `vat` and
+        `company_registry`; on `account.account` it searches the code as well
+        as the name. That breadth is right for words -- it is how a partner is
+        found by their reference -- and it is a trap for digits, because a
+        short number is a substring of somebody's email address on every real
+        database.
+
+    WHAT IT COST, LIVE (2026-09-22)
+        The agent resolved a customer correctly and sent `partner_id: "15"`,
+        which is Azure Interior's id and came from this very module. Odoo's
+        `name_search("15")` answered with exactly one record -- Soham Palmer,
+        whose email is `soham.palmer15@example.com` -- and the rule below that
+        takes a lone match whatever it scores wrote that partner into the
+        invoice. The approval card the customer had already read said "Azure
+        Interior", truthfully: the substitution happened after they approved
+        it. The invoice was posted, to the wrong company, under a real invoice
+        number.
+
+    WHY A NUMBER MAY STILL BE A NAME
+        Most of the world numbers its chart of accounts, and `account_id:
+        "101000"` is the code an accountant reads off their own trial balance,
+        not a primary key. A code lives IN the displayed name -- Odoo renders
+        that account as "101000 Current Assets" -- so the code survives this
+        filter and the email does not. That is the whole distinction: a number
+        a person would recognise on their own screen is kept, and a number
+        that only ever matched something they cannot see is dropped.
+
+    Dropping every match is a legitimate answer. `_link_target` then tries the
+    number as an id, which is what it was, and refuses if it is neither.
+    """
+    wanted = str(text or "").strip()
+    if not wanted.isdigit():
+        return matches
+    return [
+        (record_id, label) for record_id, label in matches
+        if wanted in str(label or "")
+    ]
+
+
 def pick_link_match(text: str, matches):
     """Which of the vendor's matches the customer meant.
 
@@ -29,7 +73,13 @@ def pick_link_match(text: str, matches):
         customer got exactly right, and the agent then asks them which "Bank"
         they meant -- about the account they just named. Only a genuine tie,
         where two records carry the same name, is a question worth asking.
+
+    A NUMBER IS FILTERED BEFORE ANY OF THAT. See `named_by`: a digit string
+    that matched something only through a column nobody reads is not a match,
+    and the rule below -- which takes a lone candidate whatever it scores --
+    must never be handed one.
     """
+    matches = named_by(text, matches)
     wanted = str(text or "").strip().casefold()
     exact = [
         (record_id, label) for record_id, label in matches
