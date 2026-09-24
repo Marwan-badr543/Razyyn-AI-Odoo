@@ -73,6 +73,8 @@ class Package:
     requirement: str
     #: What stops working without it, in a sentence an administrator can read.
     purpose: str
+    #: What the module does instead while it is missing.
+    fallback: str = "falls back to sending the picture to the model as it is"
 
     def present(self) -> bool:
         try:
@@ -115,6 +117,7 @@ PYTHON_PACKAGES: tuple[Package, ...] = (
         module="sqlglot",
         requirement="sqlglot",
         purpose="excluding draft and cancelled records from every read the agent makes",
+        fallback="is skipped: each read runs as written and the reply says so",
     ),
 )
 
@@ -248,7 +251,14 @@ def _teach_the_interpreter_about(command: list[str]) -> None:
     "what is in here". Both are corrected here, so the very first chat turn
     after the install can read a picture.
     """
-    if "--user" in command:
+    # Not only after `--user`: a pip that cannot write the interpreter's own
+    # site-packages falls back to ~/.local on its own ("Defaulting to user
+    # installation"), and on Ubuntu 24.04 -- the Odoo 18 image -- that is where
+    # the `--break-system-packages` attempt lands. Python only puts ~/.local on
+    # sys.path at start-up and only if it already existed, so without this the
+    # re-import below misses a package pip wrote, and the install log says it
+    # could not be installed.
+    if "--user" in command or not _in_virtual_environment():
         try:
             user_site = site.getusersitepackages()
         except Exception:
@@ -384,8 +394,13 @@ def ensure(logger: logging.Logger | None = None) -> Report:
             attempt = _run(command, wanted)
             report.attempts.append(attempt)
             if not attempt.succeeded:
-                log.warning(
-                    "Razyyn AI: `%s` did not install the reader (exit %s).",
+                # INFO, not WARNING: on a distribution-managed Python (the Odoo
+                # 18 image) the first two ways are EXPECTED to be refused and
+                # the third to work. An administrator reading the install log
+                # took two warnings for a failed install. What is still missing
+                # at the end is warned about once, in _finish.
+                log.info(
+                    "Razyyn AI: `%s` was refused (exit %s); trying the next way.",
                     " ".join(attempt.command), attempt.returncode,
                 )
                 continue
@@ -408,14 +423,13 @@ def _finish(report: Report, log: logging.Logger) -> Report:
         log.info("Razyyn AI: installed %s.", ", ".join(report.installed))
 
     for requirement in report.failed:
-        purpose = next(
-            (p.purpose for p in PYTHON_PACKAGES if p.requirement == requirement),
-            "reading scanned documents",
-        )
+        package = next((p for p in PYTHON_PACKAGES if p.requirement == requirement), None)
+        purpose = package.purpose if package else "reading scanned documents"
+        fallback = package.fallback if package else Package.fallback
         log.warning(
-            "Razyyn AI: %s could not be installed, so %s falls back to sending the "
-            "picture to the model as it is. Install it into %s to restore it.",
-            requirement, purpose, sys.executable,
+            "Razyyn AI: %s could not be installed, so %s %s. Install it into %s "
+            "to restore it.",
+            requirement, purpose, fallback, sys.executable,
         )
 
     command = system_install_command()
