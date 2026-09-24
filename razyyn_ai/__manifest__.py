@@ -3,7 +3,7 @@
 
 {
     "name": "Razyyn AI",
-    "version": "18.0.1.10.0",
+    "version": "18.0.1.11.0",
     "summary": "The Razyyn AI accounting agent, inside Odoo: chat, reading, "
                "and governed recording of entries.",
     "description": """
@@ -30,7 +30,11 @@ and neither can drift.
     "website": "https://razyyn.com",
     "license": "LGPL-3",
     "category": "Accounting",
-    "images": ["static/description/connections_screenshot.png"],
+    "images": [
+        "static/description/hero_marketplace.png",
+        "static/description/banner_features.png",
+        "static/description/banner_trust.png",
+    ],
     "depends": ["base", "mail", "web", "account"],
     "data": [
         "security/security.xml",
