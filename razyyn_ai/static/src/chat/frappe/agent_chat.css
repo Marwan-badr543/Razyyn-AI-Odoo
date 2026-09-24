@@ -219,6 +219,7 @@
 
 /* Authentication card styling */
 .agent-auth-card {
+	position: relative;
 	max-width: 450px;
 	margin: auto;
 	padding: 35px;
@@ -227,6 +228,19 @@
 	background-color: var(--chat-card-bg);
 	box-shadow: var(--shadow-card-auth);
 	transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+	overflow: hidden;
+}
+
+/* A thin brand-gradient cap, so the card reads as Razyyn's before anyone
+ * reaches the wordmark below it -- the same low-poly blues as the mark. */
+.agent-auth-card::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 4px;
+	background: linear-gradient(90deg, #1e40af, #297bc3, #22d0f2);
 }
 
 .agent-auth-card:hover {
@@ -234,32 +248,74 @@
 	box-shadow: var(--shadow-card-auth-hover);
 }
 
+.agent-auth-header {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 24px;
+}
+
+.agent-auth-header .agent-brand-mark-svg {
+	height: 40px;
+	margin-bottom: 4px;
+}
+
+.agent-auth-title {
+	margin: 0;
+	font-size: 21px;
+	font-weight: 700;
+	color: var(--chat-text);
+}
+
+.agent-auth-tagline {
+	margin: 0;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--chat-text-muted);
+}
+
+/* A segmented pill switch, not a two-item underline strip -- with only two
+ * choices it reads as one control with a state rather than two separate
+ * links, and it is the same pattern the rest of the product already uses
+ * for a binary choice. */
 .agent-auth-card .nav-tabs {
-	border-bottom: 2px solid var(--chat-border);
+	display: flex;
+	border-bottom: none;
 	margin-bottom: 25px;
-	gap: 15px;
+	gap: 4px;
+	padding: 4px;
+	background-color: var(--bg-raised);
+	border-radius: 10px;
+}
+
+.agent-auth-card .nav-item {
+	flex: 1;
 }
 
 .agent-auth-card .nav-link {
+	display: block;
 	border: none;
 	color: var(--chat-text-muted);
 	font-weight: 600;
+	font-size: 13.5px;
 	padding: 8px 16px;
 	cursor: pointer;
-	border-radius: 6px;
+	border-radius: 7px;
+	text-align: center;
 	transition: all 0.2s;
 }
 
 .agent-auth-card .nav-link:hover {
 	color: var(--chat-primary);
-	background-color: var(--color-accent-glow);
 }
 
 .agent-auth-card .nav-link.active {
 	color: var(--chat-primary);
-	border-bottom: 3px solid var(--chat-primary);
-	background: transparent;
-	border-radius: 6px 6px 0 0;
+	background-color: var(--chat-card-bg);
+	box-shadow: var(--shadow-sm);
 }
 
 .agent-auth-card .form-group {
@@ -286,6 +342,34 @@
 	outline: none;
 	font-family: var(--chat-font);
 	transition: all 0.2s;
+}
+
+/* Leading-icon fields: the icon sits over the input rather than beside it, so
+ * the label above stays the only thing that names the field -- the icon is a
+ * glance-able hint, not a second label. */
+.auth-input-wrap {
+	position: relative;
+}
+
+.auth-input-wrap input,
+.auth-input-wrap select {
+	padding-inline-start: 40px;
+}
+
+.auth-input-icon {
+	position: absolute;
+	inset-inline-start: 13px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 17px;
+	height: 17px;
+	color: var(--chat-text-muted);
+	pointer-events: none;
+	transition: color 0.2s;
+}
+
+.auth-input-wrap:focus-within .auth-input-icon {
+	color: var(--chat-primary);
 }
 
 .agent-auth-card select {
@@ -377,7 +461,7 @@
 .agent-auth-btn {
 	width: 100%;
 	padding: 13px;
-	background-color: var(--chat-primary);
+	background: linear-gradient(135deg, var(--chat-primary), var(--chat-primary-hover));
 	color: var(--text-on-accent);
 	border: none;
 	border-radius: 8px;
@@ -387,15 +471,25 @@
 	font-family: var(--chat-font);
 	transition: all 0.2s ease-in-out;
 	margin-top: 10px;
+	box-shadow: 0 4px 14px var(--color-accent-shadow);
 }
 
 .agent-auth-btn:hover {
-	background-color: var(--chat-primary-hover);
+	filter: brightness(1.06);
 	transform: translateY(-1px);
+	box-shadow: 0 6px 18px var(--color-accent-shadow);
 }
 
 .agent-auth-btn:active {
 	transform: translateY(0);
+}
+
+.agent-auth-btn:disabled {
+	background: var(--color-accent-disabled);
+	box-shadow: none;
+	cursor: not-allowed;
+	transform: none;
+	filter: none;
 }
 
 /* Chat Layout with Left Sidebar */

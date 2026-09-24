@@ -4835,6 +4835,41 @@ const RAZYYN_BRAND_MARK = `
 `;
 
 /**
+ * Leading icons for the auth card's fields. Inline (not an icon font) so the
+ * card never waits on, or falls back oddly without, a font that has not
+ * loaded yet -- the same reasoning as the brand mark above.
+ */
+const AUTH_ICON_COMPANY = `
+	<svg class="auth-input-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+		<rect x="3.5" y="3" width="9" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
+		<rect x="12.5" y="8" width="4" height="9" rx="1" stroke="currentColor" stroke-width="1.5"/>
+		<path d="M6 6.5H9.5M6 9.5H9.5M6 12.5H9.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+	</svg>
+`;
+
+const AUTH_ICON_GLOBE = `
+	<svg class="auth-input-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+		<circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+		<path d="M3 10H17M10 3C11.9 5.1 12.9 7.5 12.9 10C12.9 12.5 11.9 14.9 10 17C8.1 14.9 7.1 12.5 7.1 10C7.1 7.5 8.1 5.1 10 3Z" stroke="currentColor" stroke-width="1.5"/>
+	</svg>
+`;
+
+const AUTH_ICON_EMAIL = `
+	<svg class="auth-input-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+		<rect x="2.5" y="4.5" width="15" height="11" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+		<path d="M3.5 5.5L10 11L16.5 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+	</svg>
+`;
+
+const AUTH_ICON_LOCK = `
+	<svg class="auth-input-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+		<rect x="4" y="9" width="12" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+		<path d="M6.5 9V6.5C6.5 4.6 8 3 10 3C12 3 13.5 4.6 13.5 6.5V9" stroke="currentColor" stroke-width="1.5"/>
+		<circle cx="10" cy="12.8" r="1.1" fill="currentColor"/>
+	</svg>
+`;
+
+/**
  * Where the Terms of Use live, in the reader's own language.
  *
  * The site publishes one page per language under its own prefix, and this
@@ -5390,9 +5425,11 @@ class AccountantAgentChat {
 
 		let card_html = `
 			<div class="agent-auth-card">
-				<h3 class="text-center" style="margin-top: 0; margin-bottom: 20px; font-weight: 700; color: var(--chat-primary);">
-					Razyyn
-				</h3>
+				<div class="agent-auth-header">
+					${RAZYYN_BRAND_MARK}
+					<h3 class="agent-auth-title">Razyyn</h3>
+					<p class="agent-auth-tagline">${__('Intelligent Accountancy')}</p>
+				</div>
 				<ul class="nav nav-tabs d-flex justify-content-center">
 					<li class="nav-item">
 						<a class="nav-link ${this.active_tab === 'login' ? 'active' : ''}" data-tab="login">${__('Login')}</a>
@@ -5406,25 +5443,37 @@ class AccountantAgentChat {
 					<form id="agent-auth-form">
 						<div class="form-group signup-field" style="display: ${this.active_tab === 'signup' ? 'block' : 'none'};">
 							<label for="auth-company">${__('Company Name')}</label>
-							<input type="text" id="auth-company" placeholder="e.g. My Company Corp">
+							<div class="auth-input-wrap">
+								${AUTH_ICON_COMPANY}
+								<input type="text" id="auth-company" placeholder="e.g. My Company Corp">
+							</div>
 						</div>
 
 						<div class="form-group signup-field" style="display: ${this.active_tab === 'signup' ? 'block' : 'none'};">
 							<label for="auth-country">${__('Country')}</label>
-							<select id="auth-country">
-								<option value="">${__('Loading countries…')}</option>
-							</select>
+							<div class="auth-input-wrap">
+								${AUTH_ICON_GLOBE}
+								<select id="auth-country">
+									<option value="">${__('Loading countries…')}</option>
+								</select>
+							</div>
 							<small class="text-muted auth-country-note">${__('The country your books are kept under. It decides which accounting law the agent applies.')}</small>
 						</div>
 
 						<div class="form-group">
 							<label for="auth-email">${__('Email Address')}</label>
-							<input type="email" id="auth-email" placeholder="email@example.com" required>
+							<div class="auth-input-wrap">
+								${AUTH_ICON_EMAIL}
+								<input type="email" id="auth-email" placeholder="email@example.com" required>
+							</div>
 						</div>
 
 						<div class="form-group">
 							<label for="auth-password">${__('Password')}</label>
-							<input type="password" id="auth-password" placeholder="••••••••" required>
+							<div class="auth-input-wrap">
+								${AUTH_ICON_LOCK}
+								<input type="password" id="auth-password" placeholder="••••••••" required>
+							</div>
 						</div>
 
 						<div class="form-group signup-field agent-auth-terms" style="display: ${this.active_tab === 'signup' ? 'block' : 'none'};">
