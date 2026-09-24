@@ -125,6 +125,7 @@ def _transform_readme(text: str) -> str:
 #: Never copied: build artefacts and version control.
 _SKIP_DIRS = {"__pycache__", ".git"}
 _SKIP_SUFFIXES = {".pyc", ".pyo"}
+_LOCAL_CONFIG = "agent_config.json"
 
 _VIEW_MODE = re.compile(
     r"<field name=\"view_mode\">[^<]*</field>"
@@ -180,6 +181,10 @@ def _transform_manifest(text: str) -> str:
 
 
 def generate(source: pathlib.Path, target: pathlib.Path) -> None:
+    # Each bench has its own ignored URL override. Regeneration must neither
+    # copy Odoo 17's override to Odoo 18 nor delete Odoo 18's own override.
+    local_config = target / _LOCAL_CONFIG
+    saved_config = local_config.read_bytes() if local_config.exists() else None
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -188,6 +193,8 @@ def generate(source: pathlib.Path, target: pathlib.Path) -> None:
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
         if path.suffix in _SKIP_SUFFIXES:
+            continue
+        if path.name == _LOCAL_CONFIG:
             continue
 
         destination = target / path.relative_to(source)
@@ -207,6 +214,9 @@ def generate(source: pathlib.Path, target: pathlib.Path) -> None:
             )
         else:
             shutil.copy2(path, destination)
+
+    if saved_config is not None:
+        (target / _LOCAL_CONFIG).write_bytes(saved_config)
 
 
 def generate_verbatim(source_root: pathlib.Path, target_root: pathlib.Path) -> None:
@@ -255,10 +265,16 @@ def _differences(left: pathlib.Path, right: pathlib.Path) -> list[str]:
 
     def walk(comparison: filecmp.dircmp, prefix: str) -> None:
         for name in comparison.left_only:
+            if name == _LOCAL_CONFIG:
+                continue
             out.append(f"only in the generated tree: {prefix}{name}")
         for name in comparison.right_only:
+            if name == _LOCAL_CONFIG:
+                continue
             out.append(f"only in the committed tree:  {prefix}{name}")
         for name in comparison.diff_files:
+            if name == _LOCAL_CONFIG:
+                continue
             out.append(f"differs: {prefix}{name}")
         for name, sub in comparison.subdirs.items():
             walk(sub, f"{prefix}{name}/")
