@@ -268,7 +268,7 @@ class AgentSettings(models.Model):
         compute="_compute_connection_status"
     )
     platform_api_base_url = fields.Char(
-        string="Platform API Base URL", default="https://app.razyyn.com"
+        string="Platform API Base URL", default="https://api.razyyn.com"
     )
     erp_base_url = fields.Char(
         string="ERP Base URL", compute="_compute_erp_base_url"
