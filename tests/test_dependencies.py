@@ -34,6 +34,8 @@ _spec = importlib.util.spec_from_file_location(
 dependencies = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = dependencies
 _spec.loader.exec_module(dependencies)
+#: Taken before any case patches the list with stand-ins.
+_DECLARED_PACKAGES = dependencies.PYTHON_PACKAGES
 
 
 def _package(name):
@@ -137,6 +139,61 @@ class WhatCountsAsInstalled(unittest.TestCase):
         self.assertEqual(len(attempts), 3, "it stopped at the first exit code of 0")
         self.assertFalse(report.python_ready)
         self.assertEqual(report.failed, ["alpha"])
+
+    def test_a_pip_that_defaulted_to_the_user_site_is_found_there(self):
+        # Ubuntu 24.04, the Odoo 18 image: `--break-system-packages` without
+        # `--user`, run as a user who cannot write /usr, lands in ~/.local on
+        # its own. Python added ~/.local to sys.path only if it existed at
+        # start-up, so unless it is added now the re-import misses what pip
+        # wrote and the install log calls a working install a failure.
+        user_site = "/home/odoo/.local/lib/python3/site-packages"
+        path = [p for p in sys.path if p != user_site]
+        with _outside_a_virtual_environment(), \
+             mock.patch.object(dependencies.sys, "path", path), \
+             mock.patch.object(dependencies.site, "getusersitepackages", return_value=user_site):
+            dependencies._teach_the_interpreter_about(
+                [sys.executable, "-m", "pip", "install", "--break-system-packages"]
+            )
+            self.assertIn(user_site, path)
+
+    def test_inside_a_virtual_environment_the_user_site_stays_off_the_path(self):
+        user_site = "/home/odoo/.local/lib/python3/site-packages"
+        path = [p for p in sys.path if p != user_site]
+        with mock.patch.multiple(dependencies.sys, prefix="/venv", base_prefix="/usr"), \
+             mock.patch.object(dependencies.sys, "path", path), \
+             mock.patch.object(dependencies.site, "getusersitepackages", return_value=user_site):
+            dependencies._teach_the_interpreter_about([sys.executable, "-m", "pip", "install"])
+            self.assertNotIn(user_site, path)
+
+    def test_a_package_that_is_not_the_reader_does_not_say_it_sends_a_picture(self):
+        sqlglot = next(p for p in _DECLARED_PACKAGES if p.requirement == "sqlglot")
+        report = dependencies.Report(failed=["sqlglot"])
+        with self.assertLogs(dependencies._logger, level="WARNING") as logs, \
+             mock.patch.object(dependencies, "PYTHON_PACKAGES", _DECLARED_PACKAGES), \
+             mock.patch.object(dependencies, "missing_binaries", return_value=[]):
+            dependencies._finish(report, dependencies._logger)
+
+        line = next(m for m in logs.output if "sqlglot could not be installed" in m)
+        self.assertIn(sqlglot.fallback, line)
+        self.assertNotIn("picture", line)
+
+    def test_a_refused_way_that_the_next_one_repairs_warns_about_nothing(self):
+        # The Odoo 18 image: plain and --user are refused (PEP 668), the third
+        # works. The log a customer reads must not carry a WARNING for that.
+        codes = [1, 1, 0]
+        answers = [[_package("alpha")], []]
+
+        def run(command, requirements):
+            return dependencies.Attempt(command + requirements, codes.pop(0), "refused")
+
+        with _outside_a_virtual_environment(), _pip_is_installed(), \
+             mock.patch.object(dependencies, "missing_packages", side_effect=lambda: answers.pop(0)), \
+             mock.patch.object(dependencies, "_run", side_effect=run), \
+             self.assertLogs(dependencies._logger, level="INFO") as logs:
+            report = dependencies.ensure()
+
+        self.assertTrue(report.python_ready)
+        self.assertEqual([m for m in logs.output if m.startswith("WARNING")], [])
 
     def test_it_stops_at_the_first_one_that_actually_worked(self):
         answers = [[_package("alpha")], []]
