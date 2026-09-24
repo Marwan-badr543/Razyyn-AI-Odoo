@@ -177,6 +177,17 @@ every audit-log row and the customer's API key. Skip it on a fresh install.
 
 ## Connecting Your Odoo
 
+The module reads the agent URL from `razyyn_ai/agent_config.default.json`,
+which ships with `https://api.razyyn.com`. For a local agent, create
+`razyyn_ai/agent_config.json` with
+`{"agent_server_url": "http://localhost:8010"}` and restart Odoo. That
+override is ignored by Git and remains specific to this installation. Remove
+it to use the production URL again. The **Platform API Base URL** field in
+Connections shows the effective URL.
+
+The Odoo site's public callback address is separate: set Odoo's `web.base.url`
+to a URL the agent can reach before connecting a production site.
+
 Traditional integrations force administrators to generate API keys and copy
 secrets between apps. Razyyn AI eliminates this with **zero-credential,
 self-service onboarding**:

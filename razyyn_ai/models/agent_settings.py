@@ -19,6 +19,7 @@ from typing import Optional
 
 from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
+from ..services.server_config import server_url
 
 _logger = logging.getLogger(__name__)
 
@@ -268,7 +269,7 @@ class AgentSettings(models.Model):
         compute="_compute_connection_status"
     )
     platform_api_base_url = fields.Char(
-        string="Platform API Base URL", default="https://api.razyyn.com"
+        string="Platform API Base URL", compute="_compute_platform_api_base_url"
     )
     erp_base_url = fields.Char(
         string="ERP Base URL", compute="_compute_erp_base_url"
@@ -310,6 +311,11 @@ class AgentSettings(models.Model):
         base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url", "")
         for record in self:
             record.erp_base_url = base_url
+
+    def _compute_platform_api_base_url(self):
+        url = server_url(self.env)
+        for record in self:
+            record.platform_api_base_url = url
 
     @api.depends("api_key_lookup_hash")
     def _compute_api_key_prefix(self):
@@ -426,4 +432,3 @@ class AgentSettings(models.Model):
         from ..services import agent_connection_service as conn_svc
         conn_svc.disconnect_write_access(self.env, self.user_id.id or self.env.uid)
         return True
-

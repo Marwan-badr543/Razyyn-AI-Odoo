@@ -1,4 +1,5 @@
 __pycache__/
 *.py[cod]
 node_modules/
+# Per-install agent URL override; the committed default is production.
 razyyn_ai/agent_config.json
