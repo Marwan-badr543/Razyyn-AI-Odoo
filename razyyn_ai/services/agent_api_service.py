@@ -19,6 +19,7 @@ import logging
 import re
 from datetime import timedelta
 
+from odoo import SUPERUSER_ID
 from odoo import fields as odoo_fields
 
 from . import live_rows, sql_dialect
@@ -109,6 +110,14 @@ _MODEL_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+#: Frappe's physical spelling for a DocType — `tabAccount`, `"tabJournal Entry"`
+#: — appearing where an Odoo table belongs. Matched only after FROM or JOIN, so
+#: the three letters cannot be picked up out of a column name or a literal.
+_FRAPPE_TABLE_PATTERN = re.compile(
+    r"\b(from|join)\s+([\"`]?)(tab[A-Za-z][A-Za-z0-9_ ]*?)\2(?=\s|$|,|\))",
+    re.IGNORECASE,
+)
+
 
 def rewrite_model_names(env, query: str) -> str:
     """Resolve every dotted Odoo model name in *query* to its physical table.
@@ -133,7 +142,48 @@ def rewrite_model_names(env, query: str) -> str:
             return match.group(0)
         return f"{keyword} {env[candidate]._table}"
 
-    return _MODEL_REFERENCE_PATTERN.sub(replace, query)
+    return _FRAPPE_TABLE_PATTERN.sub(
+        lambda match: _as_this_systems_table(env, match),
+        _MODEL_REFERENCE_PATTERN.sub(replace, query),
+    )
+
+
+def _as_this_systems_table(env, match: "re.Match") -> str:
+    """A Frappe table name in an Odoo query, rewritten to the table meant.
+
+    THE AGENT WRITES FOR BOTH VENDORS AND SOMETIMES BRINGS THE OTHER ONE'S
+    SPELLING. Frappe stores a DocType in `tab<DocType>` — `tabAccount`,
+    `tabJournal Entry` — and a live Odoo session opened its search for a chart
+    of accounts with `SELECT ... FROM tabAccount`. Odoo answered "relation
+    tabaccount does not exist", which is true and useless: there is no such
+    table and no hint that the name is a different product's.
+
+    Rewritten rather than merely explained, because the name identifies the
+    document perfectly well — `Account` is exactly what this module's own
+    model resolver turns into `account.account`. A round trip spent on a
+    vendor's spelling is a round trip the customer waits through.
+
+    TWO CONDITIONS, AND BOTH ARE NEEDED. The literal name must not be a real
+    table on this database — a customer may legitimately have one starting
+    with those three letters — and the name WITHOUT the prefix must resolve to
+    a model this Odoo actually has. Anything else is left exactly as written,
+    which is the only safe direction: a rewrite that guesses turns a clear
+    error into a query against the wrong table.
+    """
+    keyword, quote, spelled = match.group(1), match.group(2), match.group(3)
+    original = match.group(0)
+    try:
+        if _actual_columns(env.cr, spelled.lower()):
+            return original
+        resolved = resolve_model_name(env, spelled[3:])
+    except Exception:  # noqa: BLE001 — an unresolvable name stays as written
+        return original
+    if not resolved or resolved not in env:
+        return original
+    _logger.info("Razyyn AI: read %s%s%s as %s (%s), which is what this "
+                 "system calls it.", quote, spelled, quote,
+                 env[resolved]._table, resolved)
+    return f"{keyword} {env[resolved]._table}"
 
 
 def validate_and_execute_query(env, sql_query: str,
@@ -342,12 +392,42 @@ def _site_languages(env) -> tuple:
     return (site,) if site == "en_US" else (site, "en_US")
 
 
+#: table name -> model name, per registry. Built once and kept on the registry
+#: object itself, so it is thrown away with it when the database's modules are
+#: reloaded and never outlives the schema it describes.
+_TABLE_INDEX_ATTRIBUTE = "_razyyn_tables_by_name"
+
+
+def _tables_of(registry) -> dict:
+    """Every table this database has a model for, indexed once.
+
+    WALKED ONCE INSTEAD OF PER LOOKUP. This used to scan the whole registry —
+    some four thousand models on a stock Odoo — on every call, and once the
+    dialect rewriter began asking it about each table in a statement (twice:
+    once for the column types, once for the fields that are not columns) a
+    plain three-column SELECT spent about ten milliseconds doing nothing but
+    that. The map cannot change without the registry changing, so it is built
+    on first use and kept beside it.
+    """
+    index = getattr(registry, _TABLE_INDEX_ATTRIBUTE, None)
+    if index is not None and index.get("__size__") == len(registry.models):
+        return index
+    index = {"__size__": len(registry.models)}
+    for model_name, model_cls in registry.models.items():
+        table = getattr(model_cls, "_table", None)
+        if table and not getattr(model_cls, "_abstract", False):
+            index.setdefault(table, model_name)
+    try:
+        setattr(registry, _TABLE_INDEX_ATTRIBUTE, index)
+    except Exception:  # noqa: BLE001 — a registry that will not be written to
+        pass
+    return index
+
+
 def _model_of_table(env, table_name: str):
     """The model whose rows live in `table_name`, or None for a junction table."""
-    for model_name, model_cls in env.registry.models.items():
-        if getattr(model_cls, "_table", None) == table_name and not getattr(model_cls, "_abstract", False):
-            return env[model_name]
-    return None
+    model_name = _tables_of(env.registry).get(table_name)
+    return env[model_name] if model_name else None
 
 
 def _column_kinds(env, table_name: str) -> dict:
@@ -360,7 +440,12 @@ def _column_kinds(env, table_name: str) -> dict:
     connection's company; told only "jsonb" it applied `->>'en_US'` to both,
     and every account lookup by code on Odoo 18 ran and returned nothing.
     """
-    kinds = _column_types(env.cr, table_name)
+    # COPIED, BECAUSE THE SOURCE IS SHARED. `_column_types` is memoised for the
+    # transaction, and the loop below rewrites "jsonb" to the finer kind. Done
+    # in place that would rewrite the memo itself, and the next caller asking
+    # for the plain PostgreSQL types would be handed this function's answer —
+    # a bug that would show up nowhere near here.
+    kinds = dict(_column_types(env.cr, table_name))
     if not any(kind == "jsonb" for kind in kinds.values()):
         return kinds
     model = _model_of_table(env, table_name)
@@ -373,6 +458,40 @@ def _column_kinds(env, table_name: str) -> dict:
     return kinds
 
 
+def _stored_twin_columns(env, table_name: str, company_id=None) -> dict:
+    """Field name -> the column that really holds it, for this table.
+
+    Only the `<field>` / `<field>_store` pair, which is how Odoo 18 moved an
+    account's code out of the table and into a per-company JSON column while
+    leaving every screen, label and document still calling it `code`. Asked of
+    the live model, so a version that has not made the move answers nothing
+    and a version that makes another one is covered without being edited.
+
+    NOTHING IS RENAMED THAT CANNOT THEN BE READ, and this rule is the whole
+    safety of the rename. A per-company column is only legible once a company
+    is known: without one, `WHERE code = '101000'` would become `WHERE
+    code_store = '101000'` — a jsonb column compared to a text literal, which
+    PostgreSQL answers with NO ERROR AND NO ROWS. A loud "column code does not
+    exist", which is what happens when the rename is skipped, is strictly
+    better than a silent empty answer to a question about a customer's chart
+    of accounts: one is corrected on the next turn, the other is reported to
+    them as fact.
+    """
+    model = _model_of_table(env, table_name)
+    if model is None:
+        return {}
+    real = _actual_columns(env.cr, table_name)
+    kinds = _column_kinds(env, table_name)
+    twins = {}
+    for name in model._fields:
+        twin = f"{name}_store"
+        if name in real or twin not in real:
+            continue
+        if kinds.get(twin) == sql_dialect.JSONB_COMPANY and company_id is None:
+            continue
+        twins[name] = twin
+    return twins
+
 def speak_this_database(env, query: str, company_id=None) -> str:
     """Rewrite the agent's SQL into the dialect this Odoo actually stores.
 
@@ -383,6 +502,16 @@ def speak_this_database(env, query: str, company_id=None) -> str:
     database, in the same query.
     """
     try:
+        # A FIELD NAME FIRST, A COLUMN TYPE SECOND, AND THE ORDER MATTERS.
+        # `code` is renamed to `code_store` before anything looks at types,
+        # so the per-company JSON read below applies to it as it would to any
+        # other JSON column. Reversed, the rename would produce a bare
+        # `code_store` nothing had been told to read per company.
+        query = sql_dialect.use_stored_twins(
+            query,
+            lambda table: _stored_twin_columns(env, table, company_id),
+            lambda table: _column_kinds(env, table),
+        )
         return sql_dialect.rewrite(
             query,
             lambda table: _column_kinds(env, table),
@@ -474,6 +603,33 @@ def _explain(env, query: str, exc: Exception) -> str:
             if not columns:
                 continue
 
+            # WHERE IT REALLY IS BEATS WHAT IT LOOKS LIKE, and it REPLACES it
+            # rather than joining it.
+            #
+            # Edit distance answered `code` on Odoo 18 with "Did you mean:
+            # code_store, note?" — `note` is unrelated, and `code_store` is
+            # worse than unrelated: it is a JSON object keyed by company, so
+            # selecting it bare succeeds and returns something that is not a
+            # code. Two candidate fixes, one of them a trap, and the agent
+            # acted on the trap. When this module knows the answer it is the
+            # only thing said, in the same words the schema reply uses.
+            moved = ""
+            # `is not None`, NOT a truth test. `_model_of_table` hands back an
+            # EMPTY RECORDSET, and an empty recordset is falsy — so `if model:`
+            # is False for every model there is, and this whole branch was
+            # dead the first time it ran.
+            model_here = _model_of_table(env, table)
+            if model_here is not None:
+                try:
+                    moved = _where_this_field_really_is(
+                        env, model_here._name, column)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("Razyyn AI: could not say where %s.%s "
+                                    "lives: %s", table, column, exc)
+            if moved:
+                lines.append(moved)
+                explained = True
+
             # The nearest real name first, because that is usually the whole
             # fix -- `type` on account_tax is `type_tax_use`, and the agent
             # spent eight attempts not finding that out.
@@ -524,6 +680,22 @@ def _posting_state(env, model_name: str):
     return None
 
 
+def _per_transaction(cr, bucket: str) -> dict:
+    """A scratch dict that lives exactly as long as this cursor does.
+
+    The schema cannot change underneath an open transaction, so what this holds
+    is valid for its whole life and gone with it.
+    """
+    store = getattr(cr, "_razyyn_schema_memo", None)
+    if store is None:
+        store = {}
+        try:
+            cr._razyyn_schema_memo = store
+        except Exception:  # noqa: BLE001 — a cursor that will not be written to
+            return {}
+    return store.setdefault(bucket, {})
+
+
 def _actual_columns(cr, table_name: str) -> set:
     """The columns this table REALLY has, asked of the database itself.
 
@@ -543,22 +715,37 @@ def _actual_columns(cr, table_name: str) -> set:
         each schema for minutes — is a small price for a field list that cannot
         be wrong.
     """
-    cr.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = %s",
-        (table_name,),
-    )
-    return {row[0] for row in cr.fetchall()}
+    # ASKED ONCE PER TRANSACTION, because it is now asked a great many times.
+    # The dialect rewriter wants a table's columns for every table in a
+    # statement, and asks twice — for the types, and for the fields that are
+    # NOT columns — so a three-table join issued six identical
+    # `information_schema` lookups before a row of the customer's own data was
+    # read.
+    memo = _per_transaction(cr, "columns")
+    if table_name not in memo:
+        cr.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (table_name,),
+        )
+        memo[table_name] = {row[0] for row in cr.fetchall()}
+    return memo[table_name]
 
 
 def _column_types(cr, table_name: str) -> dict:
-    """Column name -> its real PostgreSQL type, for this table."""
-    cr.execute(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = %s",
-        (table_name,),
-    )
-    return {row[0]: row[1] for row in cr.fetchall()}
+    """Column name -> its real PostgreSQL type, for this table.
+
+    Memoised for the transaction, for the reason given in ``_actual_columns``.
+    """
+    memo = _per_transaction(cr, "types")
+    if table_name not in memo:
+        cr.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (table_name,),
+        )
+        memo[table_name] = {row[0]: row[1] for row in cr.fetchall()}
+    return memo[table_name]
 
 
 def _translated_column_sql(env, column: str) -> str:
@@ -754,6 +941,147 @@ def _where_a_related_field_lives(env, model_name: str, field_name: str, declared
     return ""
 
 
+#: How a per-company JSON column is keyed, said once so the schema reply and a
+#: refused query cannot word it differently.
+#:
+#: THE KEY IS THE ROOT COMPANY'S ID, NOT THE COMPANY'S. Odoo reads one of these
+#: as `self.with_company(self.env.company.root_id).<field>`, and a branch
+#: company's values live under its parent's id. On a single-company database
+#: the two are the same number, which is exactly why getting it wrong here
+#: would go unnoticed until a customer with a group structure read an empty
+#: value out of a query this server told them to write.
+#:
+#: The phrase "keyed by COMPANY ID" is load-bearing: it is what the agent's
+#: prompt and this module's own tests look for. The precision follows it rather
+#: than replacing it.
+_PER_COMPANY_KEY = (
+    "keyed by COMPANY ID (the ROOT company's -- res_company.parent_id chains "
+    "up, and a company with no parent is its own root)"
+)
+
+
+def _per_company_column_advice(column: str) -> str:
+    """How to read a company-dependent JSON column, in SQL."""
+    return (
+        f"{_PER_COMPANY_KEY}; read it as {column}->>'<root company id>', "
+        f"never ->>'en_US'"
+    )
+
+
+def _where_this_field_really_is(env, model_name: str, field_name: str) -> str:
+    """Where a name that is not a column on this table actually lives, or "".
+
+    ONE ANSWER, TWO READERS, AND THEY USED TO DISAGREE. `build_schema_summary`
+    knew perfectly well that Odoo 18 keeps an account's code in `code_store`
+    and its companies in `company_ids`; `_explain` did not, and answered a
+    refused query by edit distance instead — "account_account has no `code`.
+    Did you mean: code_store, note?". `note` is nothing of the kind, and
+    `code_store` is a trap: selecting it bare returns a JSON object, so the
+    agent takes the suggestion, gets a result that is not a code, and has
+    learnt nothing. A live session spent fourteen round trips in that loop on
+    one chart of accounts and never recovered.
+
+    So the knowledge is stated once, here, and both callers read it. A field
+    the agent names is answered the same way whether it asked in advance or
+    found out the hard way.
+    """
+    model = env[model_name]
+    here = model._table
+    declared = model._fields.get(field_name)
+
+    if declared is None:
+        return _a_field_that_moved(env, model_name, field_name)
+
+    if declared.type in _NON_COLUMN_RELATIONS:
+        return _a_relation_of(env, model_name, field_name, declared)
+
+    if field_name in _actual_columns(env.cr, here):
+        return ""
+
+    # A stored twin: `code` is computed on Odoo 18 and its value is in
+    # `code_store`, a per-company JSON column.
+    twin_name = f"{field_name}_store"
+    if twin_name in _actual_columns(env.cr, here):
+        twin = model._fields.get(twin_name)
+        if (getattr(twin, "company_dependent", False)
+                or _column_types(env.cr, here).get(twin_name) == "jsonb"):
+            return (f"{field_name} is not a column on {here}. Use "
+                    f"{twin_name}->>'<root company id>' instead -- a JSON "
+                    f"column {_PER_COMPANY_KEY}.")
+        return (f"{field_name} is not a column on {here}. Its value is in the "
+                f"column {twin_name}; select or compare that instead.")
+
+    if getattr(declared, "company_dependent", False):
+        return (f"{field_name} is not a column on {here}. It is per-company: "
+                f"SELECT value_reference FROM ir_property WHERE name="
+                f"'{field_name}' AND res_id='{model_name},<row id>' "
+                f"(NULL res_id = the default).")
+
+    return _where_a_related_field_lives(env, model_name, field_name, declared)
+
+
+def _a_relation_of(env, model_name: str, field_name: str, declared) -> str:
+    """A one2many or many2many named as the join that reaches its rows."""
+    comodel = getattr(declared, "comodel_name", "") or ""
+    if comodel not in env:
+        return ""
+    target = env[comodel]._table
+    here = env[model_name]._table
+    if declared.type == "one2many":
+        inverse = getattr(declared, "inverse_name", "") or ""
+        if not inverse:
+            return ""
+        return (f"{field_name} is not a column on {here}. Its rows are in "
+                f"{target}, linked by {target}.{inverse} = {here}.id.")
+    junction = getattr(declared, "relation", "") or ""
+    if not junction:
+        return ""
+    return (f"{field_name} is not a column on {here}. Join {junction}: "
+            f"{junction}.{getattr(declared, 'column1', '?')} = {here}.id and "
+            f"{junction}.{getattr(declared, 'column2', '?')} = {target}.id "
+            f"({target}).")
+
+
+def _a_field_that_moved(env, model_name: str, field_name: str) -> str:
+    """A name this version does not have, answered with the one that replaced it.
+
+    THE RENAME THAT COST A WHOLE SESSION. Odoo 18 removed
+    `account.account.company_id` and put the companies an account belongs to in
+    `company_ids`, a many-to-many. Asked about `company_id`, edit distance
+    offered "currency_id, create_uid" — two real columns, neither of them
+    anything to do with the question — and the agent, having nothing better,
+    tried them.
+
+    Looked for by the shapes a rename actually takes: the plural of what was
+    asked for, or the singular of it. Nothing is guessed at beyond that, and
+    a name this database genuinely does not know still gets the ordinary
+    "did you mean" treatment.
+    """
+    here = env[model_name]._table
+    for candidate in (f"{field_name}s", field_name.rstrip("s")):
+        if candidate == field_name or candidate not in env[model_name]._fields:
+            continue
+        # RELATIONS ONLY, which is the shape this was found in and the only
+        # one where the plural is evidence rather than coincidence. Odoo 18
+        # replaced a scalar `company_id` with a MANY-TO-MANY `company_ids`
+        # because an account can now belong to several companies — the plural
+        # is the whole meaning of the change. Two scalar columns whose names
+        # happen to differ by an "s" are not that, and calling one the other's
+        # replacement would be a guess dressed as a fact, which is worse than
+        # the ordinary "did you mean" it would be replacing.
+        if env[model_name]._fields[candidate].type not in _NON_COLUMN_RELATIONS:
+            continue
+        reached = _where_this_field_really_is(env, model_name, candidate)
+        if reached:
+            # The replacement's own sentence opens by naming itself, which
+            # after "has no X" would read "...has no company_id. company_ids
+            # is not a column." Said once: the lead names what is missing, the
+            # rest says what to do instead.
+            _, _, instead = reached.partition(". ")
+            return (f"{here} has no {field_name} on this Odoo -- it has "
+                    f"{candidate}. {instead or reached}")
+    return ""
+
 def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
     """Field summary for one Odoo model, shaped for the agent to write SQL from
     — the Odoo counterpart of the Frappe app's ``build_doctype_schema_summary``.
@@ -876,22 +1204,13 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
             # column keyed by company id. Omitted in silence, the agent wrote
             # `WHERE code = '101001'` against a column that does not exist,
             # was told so, and had no way to learn where the code went.
-            stored_twin = f"{field.name}_store"
-            if stored_twin in real_columns:
-                twin = env[model_name]._fields.get(stored_twin)
-                if getattr(twin, "company_dependent", False) or column_types.get(stored_twin) == "jsonb":
-                    joins.append(
-                        f"{field.name}: not a column here - its value is kept per "
-                        f"company in {stored_twin}, a JSON column keyed by COMPANY "
-                        f"ID; in SQL read or compare it as "
-                        f"{stored_twin}->>'<the company id>' (e.g. WHERE "
-                        f"{stored_twin}->>'1' = '101001')"
-                    )
-                else:
-                    joins.append(
-                        f"{field.name}: not a column here - its value is kept in "
-                        f"the column {stored_twin}; select or compare that instead"
-                    )
+            # THE SAME SENTENCE A REFUSED QUERY GETS. Both readers used to
+            # work this out separately and word it differently, and the one
+            # the agent actually met — the error — was the one that had it
+            # wrong. Said once, in `_where_this_field_really_is`.
+            moved = _where_this_field_really_is(env, model_name, field.name)
+            if moved:
+                joins.append(moved)
             continue
 
         if is_denied_column(field.name):
@@ -919,11 +1238,8 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
             # then reads an empty value for a field it was told how to read,
             # which is worse than being told nothing.
             if getattr(env[model_name]._fields.get(field.name), "company_dependent", False):
-                info += (
-                    f" [per-company column, stored as JSON keyed by COMPANY ID "
-                    f"-- in SQL read this company's value as "
-                    f"{field.name}->>'<the company id>', never ->>'en_US']"
-                )
+                info += (f" [per-company column, stored as JSON "
+                         f"{_per_company_column_advice(field.name)}]")
             else:
                 info += (
                     f" [translated column, stored as JSON per language -- "
@@ -984,22 +1300,123 @@ def build_schema_summary(env, model_name: str, agent_settings=None) -> dict:
 # ─── Session ownership (IDOR guard) ──────────────────────────────────────────
 
 
-def get_or_create_session(env, session_id: str, agent_settings):
-    # The boundary on this method is the ownership check a few lines down
-    # (agent_settings_id == the caller's own connection). It is what stops one
-    # valid API key from reading or writing into another connection's session,
-    # and it is unrelated to company scoping.
+def session_this_key_may_write_to(env, session_id: str, agent_settings):
+    """The conversation this API key may attach a generated report to.
+
+    WHICH CONNECTION ROW HOLDS THE KEY IS NOT A FACT ABOUT WHO IS CHATTING.
+    That is the conclusion, and it took three wrong guards to reach it. Each
+    was live on a customer's own site, and each answered every single upload
+    with "Chat session '<their own id>' not found":
+
+      1. It compared the conversation's ``agent_settings_id`` to the caller.
+         NOTHING EVER WRITES THAT FIELD — a conversation is made by the chat
+         (``create_chat_with_id``), which records the person who owns it and no
+         connection at all — so it is empty on every row, and an empty
+         Many2one's ``.id`` is ``False``.
+      2. It compared the two OWNERS instead, which is what the Frappe app
+         does. But ``ensure_agent_credentials`` issues ONE key for the whole
+         database through ``sudo()``, so the key the platform calls back with
+         belongs to Odoo's ROOT user, never to an accountant.
+      3. It let a root-owned key reach anything and held a person-owned key to
+         its owner. The platform's key is not always the root-owned row: on the
+         customer's site it sat on a per-person row belonging to a THIRD Odoo
+         user, while the conversation belonged to the administrator. Two rows
+         for two different Odoo users carried the same ``erp_connection_id`` —
+         one Razyyn connection, several Odoo people sharing it.
+
+    ON FRAPPE an Agent Settings belongs to the person who made it, so comparing
+    people is right there and that app keeps doing it. HERE
+    ``ensure_agent_credentials`` reissues ONE key per Odoo rather than ever
+    making a second — this module saying plainly that one database is one
+    customer, and that every Odoo user in it shares the single integration.
+
+    SO THE TWO SIDES ARE MATCHED ON THE RAZYYN CONNECTION THEY SHARE, not on
+    an Odoo user — see ``_on_the_same_razyyn_connection`` for the evidence and
+    the three shapes a key comes in. A second Razyyn account connected to the
+    same Odoo carries a different ``erp_connection_id`` and is still refused,
+    so the customer boundary is kept rather than dropped.
+
+    WHAT ELSE HOLDS:
+
+      * The caller must have authenticated — resolved a connection at all.
+      * The conversation must already exist. It is never created here: the chat
+        makes it before the first turn, ``create_chat_with_id`` refuses an id
+        that already exists, and a row invented here would take the id the
+        customer's own conversation is about to claim — owned by the service
+        account, with its files beyond their own download route.
+      * READING a report is a separate question, and it is about a person.
+        ``download_file`` serves one only to the accountant whose conversation
+        it hangs on, and that is where a file is actually disclosed.
+      * A refusal is always "not found", never "forbidden", so this endpoint
+        cannot be used to learn which session ids exist.
+
+    THE AGENT DOES NOT ALWAYS KNOW A CONVERSATION BY ITS OWN ID.
+        Every turn is sent upstream under ``get_backend_session_id()``
+        (``chat_turn_service``), and EDITING A MESSAGE ROTATES THAT to a fresh
+        uuid so the desk's state starts clean. From that moment the agent asks
+        for its files under the rotated id, which is not what ``session_id``
+        holds -- so a customer who ever edited a message would read exactly the
+        same "not found" sentence again, for exactly the same report. Both
+        columns are searched, the conversation's own id first: that is its
+        identity, and a rotated id left on another row must never shadow it.
+    """
     Session = env["razyyn.agent.chat.session"].sudo()
     session = Session.search([("session_id", "=", session_id)], limit=1)
-    if session:
-        if session.agent_settings_id.id != agent_settings.id:
-            # Exists, but not this caller's — same "not found" answer as a
-            # session that never existed, so this endpoint cannot be used to
-            # enumerate another connection's session ids by response alone.
-            raise ResourceNotFoundError("Chat session", session_id)
-        session.touch()
-        return session
-    return Session.create({"session_id": session_id, "agent_settings_id": agent_settings.id})
+    if not session and session_id:
+        session = Session.search([("backend_session_id", "=", session_id)], limit=1)
+    if not session or not agent_settings or not session.user_id:
+        raise ResourceNotFoundError("Chat session", session_id)
+    if not _on_the_same_razyyn_connection(env, session, agent_settings):
+        raise ResourceNotFoundError("Chat session", session_id)
+    session.touch()
+    return session
+
+
+def _on_the_same_razyyn_connection(env, session, agent_settings) -> bool:
+    """Whether this key and this conversation belong to the same customer.
+
+    THE LINK IS ``erp_connection_id``, AND IT IS THE ONE THING THAT ACTUALLY
+    TIES THEM. It is the platform's own id for "this Odoo, connected to
+    Razyyn", and several Odoo people share one. On the customer's own two
+    databases the row holding the key and the row belonging to the person
+    chatting were DIFFERENT Odoo users, and carried the same id:
+
+        profession : settings 10 (odoo user 9) and settings 3 (odoo user 2)
+                     both a1ca599e-125c-48f0-976c-2f4b4b38deed
+        razyyn18   : settings 6  (odoo user 8) and settings 3 (odoo user 2)
+                     both 1258a45b-4947-4e2c-a95b-20bc8435d20d
+
+    That is why comparing the two OWNERS refused every upload: which connection
+    row happens to hold the key is not a fact about who is chatting. A second
+    Razyyn account connected to the same Odoo would carry a different id and is
+    still refused, so the customer boundary is kept rather than dropped.
+
+    THREE SHAPES, AND EACH IS ANSWERED ON ITS OWN TERMS:
+
+      * The key names a Razyyn connection — the ordinary case. The person who
+        owns the conversation must be on that same connection.
+      * The key names none AND belongs to Odoo's root user. That is the site's
+        own credential: ``ensure_agent_credentials`` makes exactly one per
+        database, through ``sudo()``, and records no platform connection on it.
+        One database is one customer, so it reaches any conversation there.
+      * The key names none and belongs to a person — a connection that has
+        never been linked to Razyyn. Held to its own owner, which is all that
+        can honestly be said about it.
+    """
+    Settings = env["razyyn.agent.settings"].sudo()
+    connection = (agent_settings.erp_connection_id or "").strip()
+    if connection:
+        return bool(Settings.search_count([
+            ("user_id", "=", session.user_id.id),
+            ("erp_connection_id", "=", connection),
+        ]))
+    caller = agent_settings.user_id
+    if not caller:
+        return False
+    # ``SUPERUSER_ID`` rather than ``env.ref("base.user_root")``: a missing
+    # xmlid raises, and the failure mode of anything raising in here is another
+    # customer told their report does not exist. A constant cannot fail.
+    return caller.id == SUPERUSER_ID or caller.id == session.user_id.id
 
 
 # ─── Generated file upload ───────────────────────────────────────────────────
@@ -1011,7 +1428,7 @@ def save_generated_file(env, session_id: str, filename: str, content: bytes, age
     if len(content) > MAX_GENERATED_FILE_BYTES:
         raise FileTooLargeError(len(content), MAX_GENERATED_FILE_BYTES)
 
-    session = get_or_create_session(env, session_id, agent_settings)
+    session = session_this_key_may_write_to(env, session_id, agent_settings)
 
     attachment = env["ir.attachment"].sudo().create({
         "name": filename,
@@ -1043,7 +1460,16 @@ def save_generated_file(env, session_id: str, filename: str, content: bytes, age
         # route rather than Odoo's /web/content, because the person reading
         # the chat is authenticated by this module's chat login, not
         # necessarily by an Odoo back-office session.
-        "file_url": f"/razyyn/chat/download_file?attachment_id={attachment.id}",
+        #
+        # THE ID IS IN THE PATH, WHICH IS THE SHAPE THAT ROUTE ACTUALLY SERVES.
+        # This used to hand back "…/download_file?attachment_id=7". The route
+        # is declared as `/razyyn/chat/download_file/<int:attachment_id>`, and
+        # a path with no id segment matches no route at all — so the chip the
+        # customer was shown led to an Odoo 404 even once the upload itself
+        # succeeded. It is the same address a file the customer attached
+        # themselves is served at (`upload_agent_file`), so the chat has one
+        # file address and not two.
+        "file_url": f"/razyyn/chat/download_file/{attachment.id}",
         "filename": filename,
         "attachment_id": attachment.id,
     }

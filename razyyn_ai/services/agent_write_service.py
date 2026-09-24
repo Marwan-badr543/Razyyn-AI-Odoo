@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Mapping, Optional, Sequence
 
 from odoo import fields as odoo_fields
@@ -299,6 +300,50 @@ def _could_not_process(doctype: str) -> str:
         f"saved to its log for your administrator."
     )
 
+
+
+def _their_own_words_for(env, exc: Exception) -> str:
+    """This system's OWN sentence for a database rule it refused a write on.
+
+    WHY A CRASH IS SOMETIMES A REFUSAL WEARING THE WRONG CLOTHES. Odoo states
+    some of its accounting rules as PostgreSQL CHECK constraints rather than as
+    Python, and writes a plain sentence beside each one — "Missing required
+    account on accountable line." When such a rule is broken the ORM does not
+    raise `UserError`; psycopg2 raises, and this gateway's last handler
+    correctly refuses to show a customer raw database text. So the sentence
+    Odoo wrote for exactly this moment never reached anybody, and three
+    customers in a row were told only that their system "could not process"
+    the document and to go and read a log.
+
+    Odoo's own RPC layer does this translation (`odoo/service/model.py`), but
+    that layer is above a controller, not below it, so a write made from inside
+    one never passes through it. Taken from the model's own
+    ``_sql_constraints`` rather than from the database, so it needs no query on
+    a cursor that has just been rolled back to a savepoint.
+
+    Returns "" when the failure is not a named constraint, which leaves the
+    crash a crash.
+    """
+    named = ""
+    seen: set[int] = set()
+    cause: Optional[BaseException] = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        diagnostic = getattr(cause, "diag", None)
+        named = getattr(diagnostic, "constraint_name", "") or ""
+        if named:
+            break
+        cause = cause.__cause__ or cause.__context__
+    if not named:
+        return ""
+
+    for _model_name, model_class in env.registry.items():
+        table = getattr(model_class, "_table", "") or ""
+        for constraint, _definition, message in (
+                getattr(model_class, "_sql_constraints", None) or []):
+            if f"{table}_{constraint}" == named and message:
+                return " ".join(str(message).split())
+    return ""
 
 # ─── get_document_spec ───────────────────────────────────────────────────────
 
@@ -756,6 +801,317 @@ def _rows_of(raw: Any) -> list[dict[str, Any]]:
     return rows
 
 
+# ─── What this system's own constraints say must not come out empty ──────────
+#
+# THE FAILURE THIS ANSWERS. A customer asked for a miscellaneous journal entry
+# — "debit Prepaid Expenses 500, credit Main Safe 500". The payload reached
+# Odoo with two lines carrying a label, a debit and a credit, and no account on
+# either, and the write died inside PostgreSQL on
+# `account_move_line_check_accountable_required_fields`. A CheckViolation is
+# not a `UserError`, so the customer was told their system "could not process
+# this account.move" and to go and read a log — three times, on two Odoo
+# versions, over three days.
+#
+# The account is not a field the agent forgot. `account.move.line.account_id`
+# is `compute=..., store=True, readonly=False`, so this module publishes it as
+# DERIVED — which is exactly right for an invoice line, where Odoo works the
+# account out from the product, and exactly wrong for a line in a general
+# journal, where its last fallback is the journal's own default account and the
+# Miscellaneous journal has none. One field, one model, two opposite truths,
+# decided by the rest of the document. No per-field flag can say both, and the
+# spec is per-model — so this is not a thing the published contract can fix.
+#
+# So it is asked rather than declared. Preflight already builds the document in
+# memory, which runs every compute Odoo would run; afterwards, the fields this
+# model's OWN constraints say must not be null are read back off that trial
+# record. Empty means Odoo was not going to fill it in, and the agent is told
+# so while nothing has been written — the same question the database will ask,
+# asked early enough to answer.
+#
+# KNOWN LIMIT, stated rather than papered over. When a general journal DOES
+# carry a `default_account_id`, the compute fills every line with it, the trial
+# record comes back complete and this check stays quiet — leaving an entry
+# whose debit and credit land on one account. Neither of the customer's Odoos
+# has a default account on any general journal, so all three refusals above are
+# this one cause; a rule about which accounts an entry OUGHT to use is a
+# different question from whether a value is missing, and is not decided here.
+
+#: `<field> IS NOT NULL` inside a CHECK constraint.
+_NOT_NULL = re.compile(r"\b(\w+)\s+IS\s+NOT\s+NULL", re.IGNORECASE)
+
+#: A condition on one column: `x IN (...)`, `x NOT IN (...)`, `x = 'y'`,
+#: `x != 'y'`. Enough for every exemption Odoo's own accounting, sales and mail
+#: constraints are written with, and deliberately no more.
+_GUARD_IN = re.compile(r"\b(\w+)\s+(NOT\s+)?IN\s*\(([^)]*)\)", re.IGNORECASE)
+_GUARD_EQ = re.compile(r"\b(\w+)\s*(!=|<>|=)\s*'([^']*)'")
+_LITERAL = re.compile(r"'([^']*)'")
+
+#: What this reader refuses to interpret, because misreading it would demand a
+#: value the customer's system does not want.
+#:
+#: `IS NULL` marks the "one of these two columns, not both" shape
+#: (`discuss.channel.member`: a member is a partner OR a guest); `NOT (...)`
+#: inverts everything inside it (`ir.filters`: a field must be null UNLESS
+#: another is set). Read naively, both say "required" about a column that is
+#: optional. Skipped whole, so an unreadable constraint costs nothing.
+_UNREADABLE = re.compile(r"\bIS\s+NULL\b|\bNOT\s*\(", re.IGNORECASE)
+
+#: One `field op literals` test out of a constraint's exemption branch.
+#: ``positive`` is True for `IN`/`=` and False for `NOT IN`/`!=`.
+_Clause = tuple  # (field: str, positive: bool, literals: frozenset[str])
+
+
+def _or_branches(text: str) -> list[str]:
+    """Split on OR at the TOP level only, leaving bracketed groups whole.
+
+    Quoted text is stepped over rather than read: `state IN ('OR')` is a value
+    a customer's own selection field could genuinely hold, and splitting on it
+    would cut a condition in half and leave two halves that parse as nothing.
+    """
+    out: list[str] = []
+    depth = start = 0
+    index = 0
+    quoted = False
+    while index < len(text):
+        char = text[index]
+        if quoted:
+            quoted = char != "'"
+        elif char == "'":
+            quoted = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif depth == 0 and text[index:index + 2].upper() == "OR" and (
+            (index == 0 or not text[index - 1].isalnum() and text[index - 1] != "_")
+            and (index + 2 >= len(text)
+                 or not text[index + 2].isalnum() and text[index + 2] != "_")
+        ):
+            out.append(text[start:index])
+            index += 2
+            start = index
+            continue
+        index += 1
+    out.append(text[start:])
+    return [branch.strip() for branch in out if branch.strip()]
+
+
+def _clauses_of(branch: str, model) -> tuple:
+    """One exemption branch as the tests that make it true, or () if unreadable."""
+    clauses: list[tuple] = []
+    for name, negated, listed in _GUARD_IN.findall(branch):
+        if name.upper() == "NOT" or name not in model._fields:
+            return ()
+        clauses.append((name, not negated.strip(),
+                        frozenset(_LITERAL.findall(listed))))
+    remainder = _GUARD_IN.sub(" ", branch)
+    for name, operator, literal in _GUARD_EQ.findall(remainder):
+        if name not in model._fields:
+            return ()
+        clauses.append((name, operator == "=", frozenset({literal})))
+    return tuple(clauses)
+
+
+def _constraint_requirements(model) -> dict[str, tuple]:
+    """Fields this model's CHECK constraints say must carry a value.
+
+    THE RULE, AND WHY IT IS THIS NARROW. A constraint is read only when its
+    top-level OR branches divide one way: EXACTLY ONE branch asserts things are
+    not null, and every other branch asserts none. Those others are then
+    conditions under which the requirement does not apply, which is how Odoo
+    writes an exemption — a journal line needs an account UNLESS it is a
+    section or a note.
+
+    Two branches that BOTH assert not-null are not a requirement at all, they
+    are a choice: `sale.order.line` accepts a display type OR a product and a
+    unit, and reading either as required would demand a section heading on
+    every order line. That shape is left alone, along with anything
+    ``_UNREADABLE`` matches.
+
+    Returns ``{fieldname: branches}``, where each branch is the tests that,
+    all holding, exempt a record from needing that field.
+    """
+    out: dict[str, tuple] = {}
+    for _name, definition, _message in (getattr(model, "_sql_constraints", None) or []):
+        body = " ".join(str(definition or "").split())
+        head = body.upper()
+        if head.startswith("CHECK"):
+            body = body[body.find("(") + 1:body.rfind(")")]
+        if not body or _UNREADABLE.search(body):
+            continue
+        branches = _or_branches(body)
+        asserting = [position for position, branch in enumerate(branches)
+                     if _NOT_NULL.search(branch)]
+        if len(asserting) != 1:
+            continue
+        required = [field for field in _NOT_NULL.findall(branches[asserting[0]])
+                    if field in model._fields]
+        if not required:
+            continue
+        exemptions = []
+        for position, branch in enumerate(branches):
+            if position == asserting[0]:
+                continue
+            clauses = _clauses_of(branch, model)
+            if not clauses:
+                # An exemption this reader cannot evaluate. Demanding the
+                # field anyway would refuse the very records the constraint
+                # lets through, so the whole constraint is dropped.
+                exemptions = None
+                break
+            exemptions.append(clauses)
+        if exemptions is None:
+            continue
+        for field in required:
+            out[field] = tuple(exemptions)
+    return out
+
+
+def _exempt(record, branches: tuple) -> bool:
+    """Whether this record falls under one of a constraint's exemptions."""
+    for clauses in branches:
+        if all(_holds(record, *clause) for clause in clauses):
+            return True
+    return False
+
+
+def _holds(record, field: str, positive: bool, literals: frozenset) -> bool:
+    try:
+        value = record[field]
+    except Exception:  # noqa: BLE001 — a field this trial record cannot read
+        return False
+    if isinstance(value, (list, tuple)) or hasattr(value, "_name"):
+        return False
+    spelled = "" if value in (None, False) else str(value)
+    return (spelled in literals) if positive else (spelled not in literals)
+
+
+def _empty_required_findings(env, doctype: str, values: Mapping[str, Any],
+                             trial) -> list[dict[str, str]]:
+    """Values this system was going to work out for itself and did not.
+
+    Read off the trial record rather than off the payload, which is the whole
+    point: a field left out of the payload is perfectly correct when Odoo fills
+    it in, and only Odoo can say whether it did.
+    """
+    findings: list[dict[str, str]] = []
+    model = env[doctype]
+
+    for field, branches in _constraint_requirements(model).items():
+        if trial[field] or _exempt(trial, branches):
+            continue
+        findings.append(_finding(field, _needs_a_value(model._fields[field])))
+
+    for name, value in values.items():
+        field = model._fields.get(name)
+        if field is None or field.type != "one2many" or not _rows_of(value):
+            continue
+        child = env[field.comodel_name]
+        wanted = _constraint_requirements(child)
+        if not wanted:
+            continue
+        table = field.string or name
+        for ordinal, row in enumerate(trial[name], start=1):
+            for cname, branches in wanted.items():
+                if row[cname] or _exempt(row, branches):
+                    continue
+                findings.append(_finding(
+                    # ONE-BASED, because it is the line the customer is
+                    # looking at on their own screen and the line they will
+                    # be asked about.
+                    f"{name}[{ordinal}].{cname}",
+                    f"Row {ordinal} of '{table}' — "
+                    + _needs_a_value(child._fields[cname]),
+                ))
+    return findings
+
+
+def _one_account_on_every_line(env, doctype: str, values: Mapping[str, Any],
+                               trial) -> list[dict[str, str]]:
+    """A double-entry document whose every line was posted to ONE account.
+
+    THE OTHER HALF OF THE MISSING ACCOUNT, and the half that does not announce
+    itself. When a general journal carries a `default_account_id`, Odoo's
+    compute does not leave the line empty — it fills EVERY line with that one
+    account. The entry then balances, the constraint is satisfied, nothing
+    refuses it, and what lands in the customer's ledger is a debit and a
+    credit against the same account: a document that records the movement of
+    nothing at all. The customer who reported this read their approval card
+    and asked "debit and credit is the same account, how that?".
+
+    NARROW ON PURPOSE, BECAUSE THE SHAPE IS LEGAL. Two lines on one account is
+    a real thing to want — a reclassification between analytic distributions,
+    a storno correction. What is never wanted is arriving there by ACCIDENT,
+    and the difference is whether anybody chose it: if a row of the payload
+    names an account, the single account is the author's; if not a single row
+    does, it is whatever the system fell back to. Only the second is refused,
+    so a deliberate same-account entry goes through untouched.
+    """
+    findings: list[dict[str, str]] = []
+    model = env[doctype]
+    for name, value in values.items():
+        field = model._fields.get(name)
+        rows = _rows_of(value)
+        if field is None or field.type != "one2many" or len(rows) < 2:
+            continue
+        child = env[field.comodel_name]
+        if "debit" not in child._fields or "credit" not in child._fields:
+            continue
+
+        # THE DOCUMENT HAS TO BE ONE THE WORK POSTED BY HAND. An invoice's
+        # lines carry a product and a quantity; their debits, credits and
+        # accounts are all Odoo's to work out, and a one-line invoice
+        # legitimately touches exactly one account — which this guard would
+        # otherwise call an accident and refuse. Only a payload that states
+        # its own debits AND credits is a journal entry somebody wrote, and
+        # only there does "every line on one account" mean anything went
+        # wrong.
+        stated = [row for row in rows if row.get("debit") or row.get("credit")]
+        if len(stated) < 2:
+            continue
+        if not (any(row.get("debit") for row in stated)
+                and any(row.get("credit") for row in stated)):
+            continue
+
+        link = next((f for f, spec in child._fields.items()
+                     if spec.type == "many2one"
+                     and spec.comodel_name == "account.account"), None)
+        if link is None or any(row.get(link) for row in rows):
+            continue
+
+        posted_to = {row[link].id for row in trial[name]
+                     if row[link] and not _skipped_line(row)}
+        if len(posted_to) != 1:
+            continue
+        account = env["account.account"].browse(next(iter(posted_to)))
+        findings.append(_finding(
+            name,
+            f"Every line of '{field.string or name}' was posted to the same "
+            f"account, {account.display_name}, because none of them said "
+            f"which account to use and this system fell back to the journal's "
+            f"default. A debit and a credit against one account record "
+            f"nothing. State the account each line belongs to.",
+        ))
+    return findings
+
+
+def _skipped_line(row) -> bool:
+    """A heading or a note, which carries no account and is not a posting."""
+    try:
+        return str(row["display_type"] or "") in ("line_section", "line_note")
+    except Exception:  # noqa: BLE001 — a model with no such notion
+        return False
+
+def _needs_a_value(field) -> str:
+    """Why an empty field is a refusal rather than a blank."""
+    where = (f" It names one of your {field.comodel_name} records."
+             if field.type == "many2one" and field.comodel_name else "")
+    return (
+        f"'{field.string or field.name}' is empty. This system works that out "
+        f"from the rest of the document where it can, and here it could not — "
+        f"so it has to be stated.{where}"
+    )
+
 def _balance_findings(env, model, values: Mapping[str, Any]) -> list[dict[str, str]]:
     """Double-entry lines that do not balance.
 
@@ -789,12 +1145,17 @@ def _balance_findings(env, model, values: Mapping[str, Any]) -> list[dict[str, s
     return out
 
 
-def preflight_document(env, payload: Mapping[str, Any], run_dry_run: bool = True) -> dict[str, Any]:
+def preflight_document(env, payload: Mapping[str, Any], run_dry_run: bool = True,
+                       default_company=None) -> dict[str, Any]:
     """Check a payload without writing it, and answer in findings.
 
     Findings rather than an exception, because a refusal the agent can read is
     one it can fix: a missing field it can ask the customer about, an
     unbalanced entry it can correct. An exception is just "no".
+
+    ``default_company`` IS THE CONNECTION'S OWN COMPANY, and it is what makes
+    a name mean something on a database with more than one set of books. See
+    ``_the_company_of``.
     """
     doctype = str(payload.get("doctype") or "")
     if not doctype:
@@ -847,12 +1208,13 @@ def preflight_document(env, payload: Mapping[str, Any], run_dry_run: bool = True
     findings.extend(_balance_findings(env, model, values))
 
     if run_dry_run and not findings:
-        findings.extend(_dry_run_findings(env, doctype, values))
+        findings.extend(_dry_run_findings(env, doctype, values, default_company))
 
     return {"findings": findings}
 
 
-def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict[str, str]]:
+def _dry_run_findings(env, doctype: str, values: Mapping[str, Any],
+                      default_company=None) -> list[dict[str, str]]:
     """What Odoo itself says about this payload, WITHOUT writing anything.
 
     NOTHING IS INSERTED, AND THAT IS THE WHOLE POINT
@@ -882,7 +1244,8 @@ def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict
         passes because of this.
     """
     try:
-        record = env[doctype].sudo().new(_odoo_values(env, doctype, values))
+        record = env[doctype].sudo().new(
+            _odoo_values(env, doctype, values, company=default_company))
     except (ValidationError, UserError) as exc:
         return [_finding("payload", _readable(exc))]
     except WriteRejectedError as refusal:
@@ -901,25 +1264,53 @@ def _dry_run_findings(env, doctype: str, values: Mapping[str, Any]) -> list[dict
         return [_finding("payload", _readable(exc))]
     except Exception as exc:  # noqa: BLE001
         logger.info("Preflight constraints could not run on %s: %s", doctype, exc)
+
+    # LOUDER THAN THE TWO ABOVE, DELIBERATELY. Those fail open onto checks the
+    # real write repeats, so a miss costs a duplicate refusal. This one is the
+    # only place a value Odoo silently left empty is caught before PostgreSQL
+    # refuses it, and a refusal from PostgreSQL is the bug this exists to fix:
+    # if it ever stops running, that has to be visible in the operator's log
+    # rather than three more customers reading "could not process".
+    try:
+        return (_empty_required_findings(env, doctype, values, record)
+                or _one_account_on_every_line(env, doctype, values, record))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not check %s for values its own constraints require: %s",
+            doctype, exc, exc_info=True,
+        )
     return []
 
 
 # ─── write_batch ─────────────────────────────────────────────────────────────
 
 
-def _the_company_of(env, doctype: str, values: Mapping[str, Any]):
+def _the_company_of(env, doctype: str, values: Mapping[str, Any], fallback=None):
     """Which company this document says it is in, as an id, or None.
 
     Read BEFORE any other reference is resolved, because it is what settles the
     ones that are otherwise a genuine tie. A business with two companies has
     two journals called "Customer Invoices", two receivable accounts and two of
     most things — correctly, because they are two sets of books.
+
+    AND WHEN THE DOCUMENT DOES NOT SAY, THE CONNECTION DOES. A Razyyn
+    connection is issued against one company — the field is required on it —
+    and the READ side has always resolved a bare per-company value through it.
+    The write side did not, so on a database with two companies every
+    unqualified name the agent sent was refused as ambiguous: "Miscellaneous
+    Operations" matches more than one of your account.journal records
+    ("Miscellaneous Operations", "Miscellaneous Operations"). Both of them,
+    naturally — one per company — and the customer is left reading a refusal
+    that names the same journal twice and cannot be acted on.
+
+    The payload still wins wherever it speaks. This is only the answer to a
+    question it did not answer.
     """
     if "company_id" not in env[doctype]._fields:
         return None
     stated = values.get("company_id")
     if stated in (None, "", False):
-        return None
+        return fallback if isinstance(fallback, int) and fallback else None
     try:
         resolved = _link_target(env, "res.company", "company_id", stated)
     except Exception:
@@ -1155,7 +1546,7 @@ def _odoo_values(env, doctype: str, values: Mapping[str, Any],
     # SETTLED FIRST, BECAUSE EVERY OTHER REFERENCE MAY DEPEND ON IT. A row
     # inherits its document's company: an invoice line's account belongs to the
     # books the invoice is being raised in, and the line does not say so itself.
-    company = _the_company_of(env, doctype, values) or company
+    company = _the_company_of(env, doctype, values, company) or company
     out: dict[str, Any] = {}
     for key, value in values.items():
         field = model._fields.get(key)
@@ -1368,7 +1759,8 @@ def _invoke(record, actions, what: str) -> None:
     )
 
 
-def _apply(env, action, doctype, payload, entry, key, session_id, policy):
+def _apply(env, action, doctype, payload, entry, key, session_id, policy,
+           default_company=None):
     """Do one document's worth of work, inside its own savepoint."""
     if action not in _VALID_ACTIONS:
         raise WriteRejectedError(
@@ -1415,15 +1807,17 @@ def _apply(env, action, doctype, payload, entry, key, session_id, policy):
     # failure leaves the documents already written in this batch untouched.
     with env.cr.savepoint():
         if action == "create":
-            record = model.create(_odoo_values(env, doctype, payload))
+            record = model.create(
+                _odoo_values(env, doctype, payload, company=default_company))
         else:
             record = _existing(model, entry, doctype)
             if action == "update":
-                _change_a_draft(env, record, doctype, payload)
+                _change_a_draft(env, record, doctype, payload, default_company)
             elif action == "amend":
                 if payload:
-                    record.write(
-                        _odoo_values(env, doctype, payload, replacing=True))
+                    record.write(_odoo_values(
+                        env, doctype, payload, replacing=True,
+                        company=default_company))
             elif action == "submit":
                 _invoke(record, _POST_ACTIONS, "post")
             elif action == "cancel":
@@ -1447,7 +1841,8 @@ def _apply(env, action, doctype, payload, entry, key, session_id, policy):
             _record_party(record))
 
 
-def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any]) -> None:
+def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any],
+                    default_company=None) -> None:
     """Change a DRAFT record's own values.
 
     THE DRAFT CHECK IS TAKEN HERE, INSIDE THE SAVEPOINT, and it is the whole
@@ -1473,7 +1868,8 @@ def _change_a_draft(env, record, doctype: str, payload: Mapping[str, Any]) -> No
             f"There is nothing to change on {doctype} {record.id}.",
             code="NOTHING_TO_CHANGE",
         )
-    record.write(_odoo_values(env, doctype, payload, replacing=True))
+    record.write(_odoo_values(env, doctype, payload, replacing=True,
+                              company=default_company))
 
 
 def _assert_run_caps(policy, documents: Sequence[Mapping[str, Any]]) -> None:
@@ -1505,6 +1901,7 @@ def write_documents_batch(
     run_id: str = "",
     session_id: str = "",
     approved_by: str = "",
+    default_company=None,
 ) -> dict[str, Any]:
     """Every action of one request, in the order given.
 
@@ -1603,6 +2000,7 @@ def write_documents_batch(
             )["docname"]
             docname, docstatus, amount, label, company, party = _apply(
                 env, action, doctype, resolved, entry, key, session_id, policy,
+                default_company,
             )
         except AgentWriteError as exc:
             _record_log(env, idempotency_key=key, action=action, doctype=doctype,
@@ -1637,13 +2035,19 @@ def write_documents_batch(
             # exception's class and message on the log row and the whole
             # traceback in the server log.
             logger.exception("Agent %s failed on %s: %s", action, doctype, exc)
+            # A DATABASE RULE THIS SYSTEM WROTE A SENTENCE FOR IS STILL A
+            # REFUSAL. The operator's row keeps the exception either way; what
+            # changes is whether the customer is given the reason or sent to
+            # read a log for it.
+            said = _their_own_words_for(env, exc)
             _record_log(env, idempotency_key=key, action=action, doctype=doctype,
                         payload=payload, session_id=session_id,
-                        status="failed",
+                        status="rejected" if said else "failed",
+                        rejection_reason=said or "",
                         error_details=f"{type(exc).__name__}: {exc}")
             results.append(_result(entry, ordinal, "REJECTED",
                                    error_code="WRITE_REJECTED",
-                                   error_message=_could_not_process(doctype)))
+                                   error_message=said or _could_not_process(doctype)))
             failed.add(index)
             continue
 

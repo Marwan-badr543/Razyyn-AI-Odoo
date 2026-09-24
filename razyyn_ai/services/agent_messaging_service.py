@@ -316,12 +316,20 @@ def _slack_gap(settings, destinations) -> str:
 
 # ─── Attachments ─────────────────────────────────────────────────────────────
 
-#: The two shapes a file address takes on this site: the chat's own download
-#: route (what ``save_generated_file`` hands the agent) and Odoo's.
-_ATTACHMENT_ID = re.compile(r"^/web/content/(\d+)")
+#: The shapes a file address takes on this site: the chat's own download route
+#: — the id in the path, which is what ``save_generated_file`` and
+#: ``upload_agent_file`` both hand out — and Odoo's own ``/web/content``.
+_ATTACHMENT_ID = re.compile(r"^/(?:web/content|razyyn/chat/download_file)/(\d+)")
 
 
 def _attachment_id(url: str) -> int:
+    """The attachment an address names, or 0.
+
+    The ``?attachment_id=`` form is still read. It is the address generated
+    reports were handed out under before the chat's own route and the address
+    it served were reconciled, and a report already sitting in a transcript
+    must stay sendable.
+    """
     parsed = urlparse(str(url))
     from_query = parse_qs(parsed.query).get("attachment_id")
     if from_query and str(from_query[0]).isdigit():

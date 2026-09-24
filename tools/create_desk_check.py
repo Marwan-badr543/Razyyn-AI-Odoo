@@ -119,6 +119,58 @@ def _outcomes(batch: dict) -> list[str]:
     return [str(row.get("outcome")) for row in (batch.get("results") or [])]
 
 
+
+def _a_company_with_a_chart(gw) -> dict:
+    """A company that has both a general journal and accounts.
+
+    Written twice because the two Odoo versions really are different
+    underneath: an account carries a `company_id` on one and belongs to
+    companies through a many-to-many on the other. Trying both is also what
+    proves both shapes answer.
+    """
+    for sql in (
+        "SELECT c.id AS cid, c.name AS cname FROM res_company c "
+        "JOIN account_journal j ON j.company_id = c.id "
+        "JOIN account_account_res_company_rel r ON r.res_company_id = c.id "
+        "WHERE j.type = 'general' GROUP BY c.id, c.name LIMIT 1",
+        "SELECT c.id AS cid, c.name AS cname FROM res_company c "
+        "JOIN account_journal j ON j.company_id = c.id "
+        "JOIN account_account a ON a.company_id = c.id "
+        "WHERE j.type = 'general' GROUP BY c.id, c.name LIMIT 1",
+    ):
+        _status, body = gw.api("execute_query", {"sql_query": sql})
+        rows = body.get("rows") or body.get("data") or []
+        if rows:
+            return rows[0]
+    return {}
+
+
+def _accounts_of(gw, kind: str, company_id) -> list:
+    """Accounts of one kind in one company, asked for by `code` deliberately."""
+    for sql in (
+        f"SELECT a.id, a.code, a.name FROM account_account a "
+        f"JOIN account_account_res_company_rel r ON r.account_account_id = a.id "
+        f"WHERE a.account_type = '{kind}' AND r.res_company_id = {company_id} "
+        f"LIMIT 1",
+        f"SELECT a.id, a.code, a.name FROM account_account a "
+        f"WHERE a.account_type = '{kind}' AND a.company_id = {company_id} "
+        f"LIMIT 1",
+    ):
+        _status, body = gw.api("execute_query", {"sql_query": sql})
+        rows = body.get("rows") or body.get("data") or []
+        if rows:
+            return rows
+    return []
+
+
+def _a_general_journal(gw, company_id) -> str:
+    _status, body = gw.api("execute_query", {"sql_query": (
+        "SELECT j.name FROM account_journal j WHERE j.type = 'general' "
+        f"AND j.company_id = {company_id} LIMIT 1")})
+    rows = body.get("rows") or body.get("data") or []
+    return rows[0]["name"] if rows else "Miscellaneous Operations"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:8069")
@@ -458,6 +510,80 @@ def main() -> int:
     else:
         print("  (Telegram is not set up on this system, so the send checks "
               "were not run.)")
+
+    # ── The chain the customer actually walked ───────────────────────────────
+
+    check.section("20. the customer's own request, start to finish")
+    # WHY THIS IS HERE AND NOT SPLIT ACROSS THE SECTIONS ABOVE. Every step of
+    # it passed on its own while the whole thing failed: the desk could read a
+    # schema, preflight a payload and write a document, and still could not
+    # record "I bought a building for 5,000,000 cash" — because finding the
+    # ACCOUNTS came first, and on Odoo 18 the query anyone would write for
+    # that (`SELECT code FROM account_account`) named a column that no longer
+    # exists. Fourteen refusals, no entry, and nothing in the checks below
+    # that would have caught it.
+    company = _a_company_with_a_chart(gw)
+    check("a company with a chart of accounts can be found", bool(company),
+          "no company here has both a general journal and accounts")
+    if company:
+        fixed = _accounts_of(gw, "asset_fixed", company["cid"])
+        cash = _accounts_of(gw, "asset_cash", company["cid"])
+        check("an account can be found by the name its own screen uses "
+              "(`code`)", bool(fixed) and bool(cash),
+              "whether `code` is a column is this version's business, not the "
+              "caller's")
+        _status, body = gw.api("execute_query",
+                               {"sql_query": "SELECT id FROM tabAccount LIMIT 1"})
+        check("the other ERP's spelling of the table reaches this one's",
+              bool(body.get("rows") or body.get("data")),
+              json.dumps(body)[:250])
+
+        lines = [{"name": "Building", "debit": 5000000},
+                 {"name": "Building", "credit": 5000000}]
+        payload = {"doctype": "account.move", "move_type": "entry",
+                   "company_id": company["cname"],
+                   "journal_id": _a_general_journal(gw, company["cid"]),
+                   "date": "2026-09-23",
+                   "ref": f"Razyyn check {run} building",
+                   "line_ids": lines}
+        _status, body = gw.call("preflight", {"payload": json.dumps(payload),
+                                              "run_dry_run": 1})
+        findings = (body or {}).get("preflight", {}).get("findings") or []
+        check("an entry whose lines name no account is stopped before it is "
+              "written", len(findings) == 2, json.dumps(body)[:300])
+        check("and each line is named by the row number the customer sees",
+              [f.get("field_path") for f in findings]
+              == ["line_ids[1].account_id", "line_ids[2].account_id"],
+              json.dumps(findings)[:300])
+
+        if fixed and cash:
+            payload["line_ids"] = [
+                dict(lines[0], account_id=fixed[0]["id"]),
+                dict(lines[1], account_id=cash[0]["id"]),
+            ]
+            _status, body = gw.call("preflight", {"payload": json.dumps(payload),
+                                                  "run_dry_run": 1})
+            check("the same entry with its accounts named passes",
+                  (body or {}).get("preflight", {}).get("findings") == [],
+                  json.dumps(body)[:300])
+            _status, body = gw.call("write_batch", {"documents": json.dumps([{
+                "action": "create", "doctype": "account.move",
+                "idempotency_key": _key(run, "building"), "payload": payload,
+            }])})
+            row = (((body or {}).get("batch") or {}).get("results") or [{}])[0]
+            check("and is recorded", row.get("outcome") == "CREATED",
+                  json.dumps(body)[:300])
+            if row.get("docname"):
+                _status, body = gw.api("execute_query", {
+                    "include_cancelled": 1,
+                    "sql_query": "SELECT account_id FROM account_move_line "
+                                 f"WHERE move_id = {int(row['docname'])}",
+                })
+                seen = [r["account_id"] for r in
+                        (body.get("rows") or body.get("data") or [])]
+                check("on TWO DIFFERENT accounts, which is what a journal "
+                      "entry is", len(seen) == 2 and len(set(seen)) == 2,
+                      json.dumps(body)[:250])
 
     return check.report()
 

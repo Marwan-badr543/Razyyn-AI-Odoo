@@ -241,6 +241,88 @@ class WithAQueryInFront(unittest.TestCase):
         self.assertIn("SELECT * FROM names", out)
 
 
+#: What is a FIELD on a model but not a column on its table, per table.
+#: `account_account_v18.code` is Odoo 18's one real instance of this.
+TWINS = {
+    "account_account_v18": {"code": "code_store"},
+}
+
+
+def twins(sql, company_known=True):
+    """The rename on its own, with no type rewriting after it."""
+    return dialect.use_stored_twins(
+        sql,
+        lambda table: (TWINS.get(table, {}) if company_known else {}),
+        lambda table: SCHEMA.get(table, {}),
+    )
+
+
+class AFieldNameThatIsNotAColumn(unittest.TestCase):
+    """Odoo 18 stopped storing `account.account.code`. Every screen, label and
+    document still calls it `code`, so `SELECT code FROM account_account` is
+    the query anyone writes — and a live session wrote it six times in a row
+    while being told each time that the column does not exist."""
+
+    def test_the_field_becomes_the_column_that_holds_it(self):
+        self.assertEqual(
+            twins("SELECT id, code FROM account_account_v18"),
+            "SELECT id, code_store FROM account_account_v18",
+        )
+
+    def test_and_composes_into_the_per_company_read(self):
+        """THE POINT OF RENAMING RATHER THAN SPECIAL-CASING. Once `code` is
+        `code_store`, the per-company rule already in this file applies to it
+        with nothing further taught."""
+        self.assertEqual(
+            run(twins("SELECT id, code FROM account_account_v18 WHERE code = '101001'"),
+                company_id=1),
+            "SELECT id, code_store->>'1' AS code_store FROM account_account_v18 "
+            "WHERE code_store->>'1' = '101001'",
+        )
+
+    def test_a_real_column_of_that_name_elsewhere_is_untouched(self):
+        """`ir_sequence.code` IS a column. A rename that did not check would
+        turn a working query into a broken one."""
+        sql = "SELECT code FROM ir_sequence"
+        self.assertEqual(twins(sql), sql)
+
+    def test_a_name_both_tables_could_mean_is_left_for_the_database(self):
+        """One table has it as a column, the other as a twin. Which was meant
+        is not knowable here, and guessing could only pick the wrong one."""
+        sql = ("SELECT code FROM account_account_v18 a "
+               "JOIN ir_sequence s ON s.id = a.id")
+        self.assertEqual(twins(sql), sql)
+
+    def test_a_qualified_name_is_resolved_against_its_own_table(self):
+        """Qualified, there is no ambiguity left to be careful about."""
+        self.assertEqual(
+            twins("SELECT a.code, s.code FROM account_account_v18 a, ir_sequence s"),
+            "SELECT a.code_store, s.code FROM account_account_v18 a, ir_sequence s",
+        )
+
+    def test_an_output_label_is_not_a_column(self):
+        sql = "SELECT code_store->>'1' AS code FROM account_account_v18"
+        self.assertEqual(twins(sql), sql)
+
+    def test_the_word_inside_a_literal_is_left_alone(self):
+        sql = "SELECT id FROM account_account_v18 WHERE name ILIKE '%code = 5%'"
+        self.assertEqual(twins(sql), sql)
+
+    def test_nothing_happens_where_the_field_really_is_a_column(self):
+        """Odoo 17 stores `code` normally, so there is no twin to answer with
+        and the query is exactly as written."""
+        sql = "SELECT id, code FROM ir_sequence WHERE code = 'x'"
+        self.assertEqual(twins(sql), sql)
+
+    def test_it_is_not_renamed_when_the_rename_could_not_be_read(self):
+        """WITHOUT A COMPANY, THE RENAME IS THE DANGEROUS MOVE. `code_store`
+        compared to a text literal is a jsonb-to-text comparison PostgreSQL
+        answers with no error and no rows — a silent empty answer about a
+        customer's chart of accounts. A loud "column code does not exist" is
+        strictly better, so the site withholds the twin entirely."""
+        sql = "SELECT id, code FROM account_account_v18 WHERE code = '101001'"
+        self.assertEqual(twins(sql, company_known=False), sql)
+
 class APerCompanyJsonColumn(unittest.TestCase):
     """Odoo 18 keeps `account_account.code` per company in `code_store`, a
     jsonb column keyed by COMPANY ID. Read by language it returns nothing -
