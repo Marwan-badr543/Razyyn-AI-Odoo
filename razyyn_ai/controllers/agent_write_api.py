@@ -118,6 +118,28 @@ def _json_param(value, default):
     return value
 
 
+
+
+def _the_connections_company(settings):
+    """The company this API key was issued for, as an id, or None.
+
+    WHICH SET OF BOOKS THE AGENT IS WRITING IN. A business with two companies
+    has two journals called "Miscellaneous Operations", two accounts called
+    "Bank" and two of nearly everything else — correctly, because they are two
+    sets of books. Asked to record an entry in "Miscellaneous Operations", the
+    write side found both and refused the document as ambiguous, naming the
+    same journal to the customer twice.
+
+    The connection already answers this. It is issued against one company, the
+    field is required on it, and the READ side has passed it down since the
+    per-company columns arrived. This is the write side catching up: the same
+    fact, from the same record, so a name means the same thing whichever half
+    of the connector is asked.
+    """
+    company = getattr(settings, "company_id", None)
+    return company.id if company else None
+
+
 class RazyynAgentWriteController(http.Controller):
     """The seven protocol methods."""
 
@@ -208,7 +230,7 @@ class RazyynAgentWriteController(http.Controller):
                 methods=["POST"], csrf=False)
     def preflight(self, **_kwargs):
         params = _params()
-        _settings, failure = _authenticated(params)
+        settings, failure = _authenticated(params)
         if failure:
             return failure
         payload = _json_param(params.get("payload"), {}) or {}
@@ -218,6 +240,7 @@ class RazyynAgentWriteController(http.Controller):
             report = write_svc.preflight_document(
                 _service_env(), payload,
                 run_dry_run=bool(int(params.get("run_dry_run") or 0)),
+                default_company=_the_connections_company(settings),
             )
         except AgentWriteError as exc:
             return _error(400, exc.message, exc.code)
@@ -232,7 +255,7 @@ class RazyynAgentWriteController(http.Controller):
                 methods=["POST"], csrf=False)
     def write_batch(self, **_kwargs):
         params = _params()
-        _settings, failure = _authenticated(params)
+        settings, failure = _authenticated(params)
         if failure:
             return failure
 
@@ -246,6 +269,7 @@ class RazyynAgentWriteController(http.Controller):
                 run_id=params.get("run_id") or "",
                 session_id=params.get("session_id") or "",
                 approved_by=params.get("approved_by") or "",
+                default_company=_the_connections_company(settings),
             )
         except AgentWriteError as exc:
             # The WHOLE request was refused and nothing was written. The agent

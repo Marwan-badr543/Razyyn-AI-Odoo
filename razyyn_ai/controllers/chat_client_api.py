@@ -183,6 +183,40 @@ def _session(session_id: str):
     )
 
 
+def _the_caller_may_read(attachment) -> bool:
+    """Whether a file hanging off a conversation belongs to the person asking.
+
+    TWO KINDS OF FILE HANG OFF A CONVERSATION AND ONLY ONE IS CREATED BY THE
+    CUSTOMER. A file they attached themselves is created by them and carries
+    no ``res_id`` (``upload_agent_file``). A report the AGENT generated is
+    created by the service account -- the caller there is an API key, not a
+    person -- and is attached to the conversation by ``res_id``. Asking only
+    "did you create this" therefore refused every customer their own reports,
+    which is the other half of why no generated file on Odoo ever arrived.
+
+    So: your own upload, or a file attached to a conversation that is yours.
+    Neither branch can reach anybody else's.
+
+    READING IS PER-PERSON WHERE STORING IS PER-CONNECTION, AND THE ASYMMETRY IS
+    DELIBERATE. ``session_this_key_may_write_to`` accepts any key on the same
+    Razyyn connection, because which connection row happens to hold the key
+    says nothing about who is chatting. Reading is the narrower question and
+    stays with the person, which costs nobody anything: ``get_chats`` and
+    ``_session`` both filter on ``user_id = env.uid``, so a colleague is never
+    shown a conversation that is not theirs, and a report always lands in the
+    chat of the person who asked for it. Disclosure is decided here, so here it
+    stays strict.
+    """
+    if attachment.create_uid.id == request.env.uid:
+        return True
+    if not attachment.res_id:
+        return False
+    session = request.env["razyyn.agent.chat.session"].sudo().browse(
+        attachment.res_id
+    ).exists()
+    return bool(session) and session.user_id.id == request.env.uid
+
+
 def _owned_session_or_refuse(session_id: str):
     session = _session(session_id)
     if not session:
@@ -968,14 +1002,35 @@ class RazyynChatApi(http.Controller):
             "is_private": 1,
         }))
 
-    @http.route("/razyyn/chat/download_file/<int:attachment_id>", type="http",
+    @http.route(["/razyyn/chat/download_file/<int:attachment_id>",
+                 "/razyyn/chat/download_file"], type="http",
                 auth="user", methods=["GET"])
-    def download_file(self, attachment_id, **_kwargs):
-        """Hand back a file this user uploaded, and nobody else's."""
+    def download_file(self, attachment_id=None, **kwargs):
+        """Hand back a file from this user's own conversation, and nobody else's.
+
+        The second address, with the id in the query, is what generated
+        reports were handed out under before this route and the address it
+        served were reconciled. It is still answered so that a report already
+        sitting in a transcript still opens.
+
+        THE ID ARRIVES AS A NUMBER FROM ONE ADDRESS AND AS TEXT FROM THE OTHER,
+        and both land on this same argument. The path is typed by the route's
+        own `<int:...>` converter; a query value is never converted -- Odoo
+        merges the query string into the call's arguments as it was written, so
+        it binds here as the STRING "1549". Handed to `browse` unread, a string
+        is taken for a sequence of ids -- four of them, one per digit -- which
+        finds no record and answers "not found" with no sign of why. So it is
+        read as a number here, from wherever it came.
+        """
+        asked = str(attachment_id if attachment_id is not None
+                    else kwargs.get("attachment_id") or "")
+        if not asked.isdigit():
+            raise werkzeug.exceptions.NotFound()
+        attachment_id = int(asked)
         attachment = request.env["ir.attachment"].sudo().browse(attachment_id).exists()
         if (not attachment
                 or attachment.res_model != "razyyn.agent.chat.session"
-                or attachment.create_uid.id != request.env.uid):
+                or not _the_caller_may_read(attachment)):
             raise werkzeug.exceptions.NotFound()
         return request.make_response(
             attachment.raw,

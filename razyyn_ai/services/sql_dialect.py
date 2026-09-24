@@ -325,6 +325,83 @@ class _Reader:
         return translated_read(reference, self.languages)
 
 
+# ─── A field name that is not a column ───────────────────────────────────────
+
+#: A name written straight after AS is an output label, not a column to resolve.
+_LABELLED = re.compile(r"\bAS\s+$", re.IGNORECASE)
+
+
+def use_stored_twins(sql: str, twins_for_table, types_for_table) -> str:
+    """Replace a field name that is not a column with the column holding it.
+
+    WHY THE QUERY IS CORRECTED RATHER THAN REFUSED. Odoo 18 stopped storing
+    `account.account.code`: the field is computed, and the value lives in
+    `code_store`, a JSON column keyed by the root company's id. Everything a
+    person sees — the Chart of Accounts screen, the field's own label, every
+    Odoo document — still calls it `code`, so `SELECT code FROM
+    account_account` is the query anyone would write, and it is the query a
+    live session wrote six times in a row while being told, each time, that
+    the column does not exist.
+
+    It is the same correction this file already makes for `name`: a translated
+    column is read as `name->>'en_US'` without anybody being asked to know
+    that. Renaming the field to its stored twin here means the per-company
+    read that follows applies to it exactly as it would to any other JSON
+    column — one rule, composed, rather than a special case.
+
+    AMBIGUITY IS LEFT ALONE, AND THAT IS THE WHOLE SAFETY OF IT. On Odoo 18
+    `account_journal.code` is a perfectly real column while
+    `account_account.code` is not, and a query naming both tables could mean
+    either. So a bare name is rewritten ONLY when no table the query names has
+    it as a real column and exactly one has it as a twin; a qualified name is
+    rewritten only against the table that qualifier actually refers to.
+    Anything else is handed back untouched and the database decides.
+    """
+    masked, literals = _mask(sql)
+
+    twins_by_name = {n: (twins_for_table(t) or {})
+                     for n, t in tables_in(masked).items()}
+    wanted = {name for twins in twins_by_name.values() for name in twins}
+    if not wanted:
+        return sql
+
+    columns_by_name = {n: (types_for_table(t) or {})
+                       for n, t in tables_in(masked).items()}
+    outer = set(tables_in(masked, True))
+
+    def twin_for(qualifier: str, column: str):
+        if qualifier:
+            return twins_by_name.get(qualifier, {}).get(column)
+        # A real column anywhere in the statement wins: the name is already
+        # valid SQL somewhere, and renaming it could only break it.
+        if any(column in columns for columns in columns_by_name.values()):
+            return None
+        for scope in (outer, set(twins_by_name)):
+            found = {twins[column] for name, twins in twins_by_name.items()
+                     if name in scope and column in twins}
+            if len(found) == 1:
+                return next(iter(found))
+            if len(found) > 1:
+                return None
+        return None
+
+    pattern = re.compile(
+        r"(?<![\w.])(?:([A-Za-z_]\w*)\.)?("
+        + "|".join(re.escape(name) for name in sorted(wanted, key=len, reverse=True))
+        + r")\b"
+    )
+
+    def replace(match: re.Match) -> str:
+        if _LABELLED.search(masked[:match.start()]):
+            return match.group(0)
+        qualifier, column = match.group(1), match.group(2)
+        twin = twin_for(qualifier or "", column)
+        if not twin:
+            return match.group(0)
+        return f"{qualifier}.{twin}" if qualifier else twin
+
+    return _unmask(pattern.sub(replace, masked), literals)
+
 def rewrite(sql: str, types_for_table, languages=("en_US",), company_id=None) -> str:
     """The same query, in the dialect this database actually speaks."""
     masked, literals = _mask(sql)
